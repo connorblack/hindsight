@@ -6,6 +6,28 @@ import PageHero from '@site/src/components/PageHero';
 
 <PageHero title="Changelog" subtitle="User-facing changes only. Internal maintenance and infrastructure updates are omitted." />
 
+## [0.5.2](https://github.com/vectorize-io/hindsight/releases/tag/v0.5.2)
+
+**Features**
+
+- Added a co-occurrence graph view for exploring entity relationships in the control plane. ([`f64c5d20`](https://github.com/vectorize-io/hindsight/commit/f64c5d20))
+- Added recall controls to the mental model trigger API/CLI so you can tune what gets recalled during runs. ([`f2fc8f9f`](https://github.com/vectorize-io/hindsight/commit/f2fc8f9f))
+- Async operations now expose task payload details and associated document IDs for better observability and debugging. ([`870bf4a3`](https://github.com/vectorize-io/hindsight/commit/870bf4a3))
+
+**Improvements**
+
+- Revamped the control plane bank statistics view for clearer insights. ([`34365c32`](https://github.com/vectorize-io/hindsight/commit/34365c32))
+- Clients now send an identifying User-Agent header on all HTTP requests for easier server-side diagnostics. ([`9372462e`](https://github.com/vectorize-io/hindsight/commit/9372462e))
+
+**Bug Fixes**
+
+- Fixed consolidation retry budget handling so retries are correctly applied at the LLM call site. ([`dee58139`](https://github.com/vectorize-io/hindsight/commit/dee58139))
+- Fixed a crash during retain when embeddings and extracted facts counts didn’t match. ([`dbd1d1a7`](https://github.com/vectorize-io/hindsight/commit/dbd1d1a7))
+- Improved embedded mode cleanup stability by adding a timeout when acquiring the cleanup lock (prevents hangs). ([`6b5aa3af`](https://github.com/vectorize-io/hindsight/commit/6b5aa3af))
+- OpenClaw plugins now reliably register agent hooks on every entry invocation. ([`1be5ff33`](https://github.com/vectorize-io/hindsight/commit/1be5ff33))
+- TypeScript SDK now re-exports BankTemplate types from the package root for simpler imports. ([`581bbf3f`](https://github.com/vectorize-io/hindsight/commit/581bbf3f))
+- Bank template configuration validation was aligned with configurable fields to prevent invalid/ignored settings. ([`099f4c92`](https://github.com/vectorize-io/hindsight/commit/099f4c92))
+
 ## [0.5.1](https://github.com/vectorize-io/hindsight/releases/tag/v0.5.1)
 
 **Breaking Changes**

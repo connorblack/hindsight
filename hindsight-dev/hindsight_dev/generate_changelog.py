@@ -175,7 +175,12 @@ def find_previous_integration_tag(new_version: str, existing_tags: list[str], in
     return candidates[0][0]
 
 
-def get_commits(from_ref: str | None, to_ref: str, path_filter: str | None = None) -> list[Commit]:
+def get_commits(
+    from_ref: str | None,
+    to_ref: str,
+    path_filter: str | None = None,
+    exclude_paths: list[str] | None = None,
+) -> list[Commit]:
     """Get commits between two refs as structured data."""
     if from_ref:
         cmd = ["git", "log", "--format=%h|%s", "--no-merges", f"{from_ref}..{to_ref}"]
@@ -184,6 +189,8 @@ def get_commits(from_ref: str | None, to_ref: str, path_filter: str | None = Non
 
     if path_filter:
         cmd += ["--", path_filter]
+    elif exclude_paths:
+        cmd += ["--", ".", *[f":(exclude){p}" for p in exclude_paths]]
 
     result = subprocess.run(
         cmd,
@@ -204,7 +211,12 @@ def get_commits(from_ref: str | None, to_ref: str, path_filter: str | None = Non
     return commits
 
 
-def get_detailed_diff(from_ref: str | None, to_ref: str, path_filter: str | None = None) -> str:
+def get_detailed_diff(
+    from_ref: str | None,
+    to_ref: str,
+    path_filter: str | None = None,
+    exclude_paths: list[str] | None = None,
+) -> str:
     """Get file change stats between two refs."""
     if from_ref:
         cmd = ["git", "diff", "--stat", f"{from_ref}..{to_ref}"]
@@ -213,6 +225,8 @@ def get_detailed_diff(from_ref: str | None, to_ref: str, path_filter: str | None
 
     if path_filter:
         cmd += ["--", path_filter]
+    elif exclude_paths:
+        cmd += ["--", ".", *[f":(exclude){p}" for p in exclude_paths]]
 
     result = subprocess.run(
         cmd,
@@ -375,9 +389,10 @@ def generate_changelog_entry(
     else:
         console.print("[yellow]No previous version found, will include all commits[/yellow]")
 
-    console.print("[blue]Getting commits...[/blue]")
-    commits = get_commits(previous_tag, actual_tag)
-    file_diff = get_detailed_diff(previous_tag, actual_tag)
+    console.print("[blue]Getting commits (excluding integrations)...[/blue]")
+    exclude_paths = ["hindsight-integrations"]
+    commits = get_commits(previous_tag, actual_tag, exclude_paths=exclude_paths)
+    file_diff = get_detailed_diff(previous_tag, actual_tag, exclude_paths=exclude_paths)
 
     if not commits:
         console.print("[red]Error: No commits found for this release[/red]")
