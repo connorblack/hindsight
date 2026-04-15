@@ -237,12 +237,12 @@ def get_detailed_diff(
     return result.stdout.strip()
 
 
-def get_commit_authors(commits: list[Commit]) -> list[str]:
-    """Fetch unique GitHub logins for the given commits via the GitHub API.
+def get_commit_authors(commits: list[Commit]) -> dict[str, str]:
+    """Fetch GitHub logins keyed by commit hash via the GitHub API.
 
-    Bots (e.g. dependabot, github-actions) are excluded.
+    Bots (e.g. dependabot, github-actions) and missing authors are omitted.
     """
-    logins: dict[str, None] = {}
+    authors: dict[str, str] = {}
     for commit in commits:
         result = subprocess.run(
             ["gh", "api", f"/repos/{GITHUB_REPO}/commits/{commit.hash}", "--jq", ".author.login // \"\""],
@@ -253,28 +253,22 @@ def get_commit_authors(commits: list[Commit]) -> list[str]:
         login = result.stdout.strip()
         if not login or login.endswith("[bot]"):
             continue
-        logins.setdefault(login, None)
-    return list(logins.keys())
+        authors[commit.hash] = login
+    return authors
 
 
-def build_contributors_section(logins: list[str]) -> str:
-    """Render a contributors grid of GitHub avatars linking to profiles."""
-    if not logins:
-        return ""
-    lines = ["**Contributors**", ""]
-    lines.append(
-        '<div style={{display: "flex", flexWrap: "wrap", gap: "8px", marginTop: "8px", marginBottom: "8px"}}>'
+def _render_author_inline(login: str) -> str:
+    """Render a small inline avatar + handle link for an author."""
+    avatar = f"https://github.com/{login}.png?size=40"
+    return (
+        f'<a href="https://github.com/{login}" title="@{login}" '
+        f'target="_blank" rel="noopener noreferrer" '
+        f'style={{{{display: "inline-flex", alignItems: "center", gap: "4px", '
+        f'verticalAlign: "middle", textDecoration: "none"}}}}>'
+        f'<img src="{avatar}" alt="@{login}" width="20" height="20" '
+        f'style={{{{borderRadius: "50%", verticalAlign: "middle"}}}} />'
+        f' @{login}</a>'
     )
-    for login in logins:
-        avatar = f"https://github.com/{login}.png?size=96"
-        lines.append(
-            f'<a href="https://github.com/{login}" title="@{login}" target="_blank" rel="noopener noreferrer">'
-            f'<img src="{avatar}" alt="@{login}" width="48" height="48" '
-            f'style={{{{borderRadius: "50%"}}}} /></a>'
-        )
-    lines.append("</div>")
-    lines.append("")
-    return "\n".join(lines)
 
 
 def analyze_commits_with_llm(
@@ -326,7 +320,7 @@ def build_changelog_markdown(
     tag: str,
     entries: list[ChangelogEntry],
     integration: str | None = None,
-    contributors: list[str] | None = None,
+    authors: dict[str, str] | None = None,
 ) -> str:
     """Build markdown changelog from structured entries."""
     tag_url = (
@@ -363,17 +357,29 @@ def build_changelog_markdown(
             lines.append("")
             for entry in cat_entries:
                 commit_url = f"{GITHUB_COMMIT_URL}/{entry.commit_id}"
-                lines.append(f"- {entry.summary} ([`{entry.commit_id}`]({commit_url}))")
+                author_suffix = ""
+                if authors:
+                    login = _lookup_author(entry.commit_id, authors)
+                    if login:
+                        author_suffix = f" — {_render_author_inline(login)}"
+                lines.append(f"- {entry.summary} ([`{entry.commit_id}`]({commit_url})){author_suffix}")
             lines.append("")
 
     if not has_entries:
         lines.append("*This release contains internal maintenance and infrastructure changes only.*")
         lines.append("")
 
-    if contributors:
-        lines.append(build_contributors_section(contributors))
-
     return "\n".join(lines)
+
+
+def _lookup_author(commit_id: str, authors: dict[str, str]) -> str | None:
+    """Look up an author by full or short commit hash."""
+    if commit_id in authors:
+        return authors[commit_id]
+    for full_hash, login in authors.items():
+        if full_hash.startswith(commit_id) or commit_id.startswith(full_hash):
+            return login
+    return None
 
 
 def read_existing_changelog(path: Path, default_header: str) -> tuple[str, str]:
@@ -460,11 +466,12 @@ def generate_changelog_entry(
     for entry in entries:
         console.print(f"  [{entry.category}] {entry.summary} ({entry.commit_id})")
 
-    console.print("[blue]Fetching GitHub authors for contributors grid...[/blue]")
-    contributors = get_commit_authors(commits)
-    console.print(f"[blue]Found {len(contributors)} contributors: {', '.join('@' + c for c in contributors)}[/blue]")
+    console.print("[blue]Fetching GitHub authors per commit...[/blue]")
+    authors = get_commit_authors(commits)
+    unique = sorted(set(authors.values()))
+    console.print(f"[blue]Found {len(unique)} contributors: {', '.join('@' + c for c in unique)}[/blue]")
 
-    new_entry = build_changelog_markdown(display_version, tag, entries, contributors=contributors)
+    new_entry = build_changelog_markdown(display_version, tag, entries, authors=authors)
 
     default_header = """---
 hide_table_of_contents: true
@@ -548,15 +555,16 @@ def generate_integration_changelog_entry(
             console.print(f"  [{entry.category}] {entry.summary} ({entry.commit_id})")
 
     if commits:
-        console.print("[blue]Fetching GitHub authors for contributors grid...[/blue]")
-        contributors = get_commit_authors(commits)
-        console.print(f"[blue]Found {len(contributors)} contributors: {', '.join('@' + c for c in contributors)}[/blue]")
+        console.print("[blue]Fetching GitHub authors per commit...[/blue]")
+        authors = get_commit_authors(commits)
+        unique = sorted(set(authors.values()))
+        console.print(f"[blue]Found {len(unique)} contributors: {', '.join('@' + c for c in unique)}[/blue]")
     else:
-        contributors = []
+        authors = {}
 
     integration_tag = f"integrations/{integration}/v{display_version}"
     new_entry = build_changelog_markdown(
-        display_version, integration_tag, entries, integration=integration, contributors=contributors
+        display_version, integration_tag, entries, integration=integration, authors=authors
     )
 
     package_name = _get_package_name(integration)
