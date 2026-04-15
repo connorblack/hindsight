@@ -258,28 +258,25 @@ def get_commit_authors(commits: list[Commit]) -> dict[str, str]:
 
 
 def _render_entry_meta(commit_id: str, commit_url: str, login: str | None) -> str:
-    """Render the muted metadata span (avatar + handle + commit hash) for an entry."""
-    parts: list[str] = [
-        '<span style={{fontSize: "0.85em", color: "var(--ifm-color-emphasis-700)", '
-        'display: "inline-flex", alignItems: "center", gap: "6px", flexShrink: 0, '
-        'whiteSpace: "nowrap"}}>'
-    ]
+    """Render inline metadata: · @author · commit-hash (GitHub-release style)."""
+    sep = '<span style={{color: "var(--ifm-color-emphasis-500)", margin: "0 0.3em"}}>·</span>'
+    parts: list[str] = []
     if login:
         avatar = f"https://github.com/{login}.png?size=40"
+        parts.append(sep)
         parts.append(
             f'<a href="https://github.com/{login}" target="_blank" rel="noopener noreferrer" '
-            f'style={{{{display: "inline-flex", alignItems: "center", gap: "4px", '
-            f'color: "inherit", textDecoration: "none"}}}}>'
-            f'<img src="{avatar}" alt="@{login}" width="16" height="16" '
-            f'style={{{{borderRadius: "50%"}}}} /><span style={{{{fontStyle: "italic"}}}}>@{login}</span></a>'
+            f'style={{{{color: "var(--ifm-color-primary)", textDecoration: "none", '
+            f'display: "inline-flex", alignItems: "center", gap: "4px", verticalAlign: "middle"}}}}>'
+            f'<img src="{avatar}" alt="@{login}" width="18" height="18" '
+            f'style={{{{borderRadius: "50%"}}}} />@{login}</a>'
         )
-        parts.append('<span style={{color: "var(--ifm-color-emphasis-500)"}}>·</span>')
+    parts.append(sep)
     parts.append(
         f'<a href="{commit_url}" target="_blank" rel="noopener noreferrer" '
         f'style={{{{fontFamily: "var(--ifm-font-family-monospace, monospace)", '
-        f'color: "inherit"}}}}>{commit_id}</a>'
+        f'fontSize: "0.85em", color: "var(--ifm-color-emphasis-600)"}}}}>{commit_id}</a>'
     )
-    parts.append("</span>")
     return "".join(parts)
 
 
@@ -371,12 +368,7 @@ def build_changelog_markdown(
                 commit_url = f"{GITHUB_COMMIT_URL}/{entry.commit_id}"
                 login = _lookup_author(entry.commit_id, authors) if authors else None
                 meta = _render_entry_meta(entry.commit_id, commit_url, login)
-                row = (
-                    '<span style={{display: "flex", justifyContent: "space-between", '
-                    'alignItems: "baseline", gap: "1.5rem", flexWrap: "wrap"}}>'
-                    f"<span>{entry.summary}</span>{meta}</span>"
-                )
-                lines.append(f"- {row}")
+                lines.append(f"- {entry.summary}{meta}")
             lines.append("")
 
     if not has_entries:
