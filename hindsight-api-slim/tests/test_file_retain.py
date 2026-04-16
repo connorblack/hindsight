@@ -641,6 +641,99 @@ async def test_file_retain_maps_timestamp_to_event_date(memory_no_llm_verify, sa
 
 
 @pytest.mark.asyncio
+async def test_file_retain_forwards_all_content_fields(memory_no_llm_verify, sample_txt_content):
+    """Regression: _handle_file_convert_retain must forward every FileRetainMetadata
+    field to the inner batch_retain task without renaming or dropping it.
+
+    Covers document_id, context, metadata, tags (per-content), plus strategy
+    and document_tags (per-request). The timestamp -> event_date mapping has
+    its own test above. Existing file retain tests only assert HTTP 200 or
+    inspect the outer file_convert_retain task_payload; none verify what
+    arrives at the retain pipeline. If any of these fields were silently
+    dropped or mis-keyed -- the same failure mode as #1092 for timestamp --
+    those tests would still pass.
+    """
+    from hindsight_api.engine.parsers.base import FileParser
+    from hindsight_api.models import RequestContext
+
+    memory = memory_no_llm_verify
+
+    class NoopParser(FileParser):
+        async def convert(self, file_data: bytes, filename: str) -> str:
+            return file_data.decode("utf-8")
+
+        def supports(self, filename: str, content_type: str | None = None) -> bool:
+            return filename.endswith(".txt")
+
+        def name(self) -> str:
+            return "all_fields_regression_parser"
+
+    memory._parser_registry.register(NoopParser())
+
+    class MockFile:
+        def __init__(self, content, filename, content_type):
+            self.content = content
+            self.filename = filename
+            self.content_type = content_type
+
+        async def read(self):
+            return self.content
+
+    original_submit = memory._task_backend.submit_task
+    captured: list[dict] = []
+
+    async def capturing_submit(task_dict):
+        if task_dict.get("type") == "batch_retain":
+            captured.append(task_dict)
+            return
+        await original_submit(task_dict)
+
+    memory._task_backend.submit_task = capturing_submit
+    try:
+        request_context = RequestContext(internal=True)
+        bank_id = f"test_file_all_fields_{datetime.now(timezone.utc).timestamp()}"
+        await memory.get_bank_profile(bank_id, request_context=request_context)
+
+        await memory.submit_async_file_retain(
+            bank_id=bank_id,
+            file_items=[
+                {
+                    "file": MockFile(sample_txt_content, "doc.txt", "text/plain"),
+                    "document_id": "my_doc_id",
+                    "context": "meeting notes from Alice",
+                    "metadata": {"author": "Alice", "year": "2024"},
+                    "tags": ["report", "q1"],
+                    "timestamp": None,
+                    "parser": ["all_fields_regression_parser"],
+                    "strategy": "my_strategy",
+                }
+            ],
+            document_tags=["batch_tag"],
+            request_context=request_context,
+        )
+
+        assert len(captured) == 1, "expected exactly one batch_retain submission"
+        payload = captured[0]
+        assert payload["type"] == "batch_retain"
+
+        # Per-request fields (live on the outer task payload, not per-content).
+        assert payload.get("strategy") == "my_strategy", "strategy must be forwarded at request level"
+        assert payload.get("document_tags") == ["batch_tag"], "document_tags must be forwarded at request level"
+
+        # Per-content fields.
+        assert len(payload["contents"]) == 1
+        content = payload["contents"][0]
+        assert content["document_id"] == "my_doc_id"
+        assert content["context"] == "meeting notes from Alice"
+        assert content["metadata"] == {"author": "Alice", "year": "2024"}
+        assert content["tags"] == ["report", "q1"]
+        # content is the converted markdown (raw bytes decoded by NoopParser).
+        assert content["content"] == sample_txt_content.decode("utf-8")
+    finally:
+        memory._task_backend.submit_task = original_submit
+
+
+@pytest.mark.asyncio
 async def test_file_conversion_failure_sets_status_to_failed(memory_no_llm_verify, sample_txt_content):
     """Test that when file conversion fails, the operation status is set to 'failed' not 'completed'."""
     from hindsight_api.engine.parsers.base import FileParser
