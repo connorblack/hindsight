@@ -6889,7 +6889,7 @@ class MemoryEngine(MemoryEngineInterface):
             row = await conn.fetchrow(
                 f"""
                 UPDATE {fq_table("knowledge_bases")}
-                SET {', '.join(set_clauses)}
+                SET {", ".join(set_clauses)}
                 WHERE bank_id = $1 AND id = $2
                 RETURNING *
                 """,
@@ -7155,6 +7155,7 @@ class MemoryEngine(MemoryEngineInterface):
         tags: list[str] | None = None,
         max_tokens: int | None = None,
         trigger: dict[str, Any] | None = None,
+        kb_id: str | None = None,
         request_context: "RequestContext",
     ) -> dict[str, Any]:
         """Create a new pinned mental model.
@@ -7168,6 +7169,7 @@ class MemoryEngine(MemoryEngineInterface):
             tags: Optional tags for scoped visibility
             max_tokens: Token limit for content generation during refresh
             trigger: Trigger settings (e.g., refresh_after_consolidation)
+            kb_id: Optional knowledge base ID to associate this MM with
             request_context: Request context for authentication
 
         Returns:
@@ -7192,11 +7194,11 @@ class MemoryEngine(MemoryEngineInterface):
                 row = await conn.fetchrow(
                     f"""
                     INSERT INTO {fq_table("mental_models")}
-                    (id, bank_id, name, source_query, content, embedding, tags, max_tokens, trigger)
-                    VALUES ($1, $2, $3, $4, $5, $6, $7, COALESCE($8, 2048), COALESCE($9, '{{"refresh_after_consolidation": false}}'::jsonb))
+                    (id, bank_id, name, source_query, content, embedding, tags, max_tokens, trigger, kb_id)
+                    VALUES ($1, $2, $3, $4, $5, $6, $7, COALESCE($8, 2048), COALESCE($9, '{{"refresh_after_consolidation": false}}'::jsonb), $10)
                     RETURNING id, bank_id, name, source_query, content, tags,
                               last_refreshed_at, created_at, reflect_response,
-                              max_tokens, trigger, structured_content
+                              max_tokens, trigger, structured_content, kb_id
                     """,
                     mental_model_id,
                     bank_id,
@@ -7207,16 +7209,17 @@ class MemoryEngine(MemoryEngineInterface):
                     tags or [],
                     max_tokens,
                     json.dumps(trigger) if trigger else None,
+                    kb_id,
                 )
             else:
                 row = await conn.fetchrow(
                     f"""
                     INSERT INTO {fq_table("mental_models")}
-                    (bank_id, name, source_query, content, embedding, tags, max_tokens, trigger)
-                    VALUES ($1, $2, $3, $4, $5, $6, COALESCE($7, 2048), COALESCE($8, '{{"refresh_after_consolidation": false}}'::jsonb))
+                    (bank_id, name, source_query, content, embedding, tags, max_tokens, trigger, kb_id)
+                    VALUES ($1, $2, $3, $4, $5, $6, COALESCE($7, 2048), COALESCE($8, '{{"refresh_after_consolidation": false}}'::jsonb), $9)
                     RETURNING id, bank_id, name, source_query, content, tags,
                               last_refreshed_at, created_at, reflect_response,
-                              max_tokens, trigger, structured_content
+                              max_tokens, trigger, structured_content, kb_id
                     """,
                     bank_id,
                     name,
@@ -7226,6 +7229,7 @@ class MemoryEngine(MemoryEngineInterface):
                     tags or [],
                     max_tokens,
                     json.dumps(trigger) if trigger else None,
+                    kb_id,
                 )
 
         logger.info(f"[MENTAL_MODELS] Created pinned mental model '{name}' for bank {bank_id}")
@@ -7800,6 +7804,9 @@ class MemoryEngine(MemoryEngineInterface):
             "last_refreshed_at": row["last_refreshed_at"].isoformat() if row["last_refreshed_at"] else None,
             "created_at": row["created_at"].isoformat() if row["created_at"] else None,
         }
+        # Include kb_id if the column is present in the row
+        if "kb_id" in row.keys():
+            result["kb_id"] = row["kb_id"]
         if detail == "metadata":
             return result
 

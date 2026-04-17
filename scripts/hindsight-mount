@@ -1,0 +1,194 @@
+#!/usr/bin/env python3
+"""hindsight mount — render a Knowledge Base's mental models as local files.
+
+Usage:
+    hindsight-mount <bank_id> [<kb_id>] [--path <dir>] [--api-url <url>] [--api-key <key>]
+
+Syncs mental models from a Hindsight bank (optionally filtered by KB) to
+a local directory as markdown files. The agent can then browse them with
+normal file tools (ls, cat, Read).
+
+Default output path: ~/.agent-knowledge/<bank_id>/[<kb_id>/]
+
+Files written:
+  _index.md           — one line per MM with name + summary
+  <mm_id>.md          — rendered MM content as markdown
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import sys
+import urllib.error
+import urllib.request
+from pathlib import Path
+from typing import Any
+
+DEFAULT_API_URL = "http://localhost:8888"
+HINDSIGHT_CONFIG_PATH = Path.home() / ".hindsight" / "config"
+
+
+def load_cli_config() -> tuple[str, str | None]:
+    """Load API URL + key from ~/.hindsight/config (same source as the CLI)."""
+    api_url = os.environ.get("HINDSIGHT_API_URL")
+    api_key = os.environ.get("HINDSIGHT_API_KEY")
+    if api_url:
+        return api_url, api_key
+
+    if HINDSIGHT_CONFIG_PATH.exists():
+        for line in HINDSIGHT_CONFIG_PATH.read_text().splitlines():
+            line = line.strip()
+            if line.startswith("api_url"):
+                api_url = line.split("=", 1)[1].strip().strip('"')
+            elif line.startswith("api_key"):
+                api_key = line.split("=", 1)[1].strip().strip('"')
+
+    return api_url or DEFAULT_API_URL, api_key
+
+
+def http_get(url: str, api_key: str | None) -> Any:
+    req = urllib.request.Request(url)
+    if api_key:
+        req.add_header("Authorization", f"Bearer {api_key}")
+    with urllib.request.urlopen(req) as resp:
+        return json.loads(resp.read().decode())
+
+
+def fetch_mental_models(
+    api_url: str, api_key: str | None, bank_id: str, kb_id: str | None
+) -> list[dict[str, Any]]:
+    """Fetch mental models from the API, optionally filtered by KB."""
+    base = f"{api_url.rstrip('/')}/v1/default/banks/{bank_id}/mental-models"
+    params = "?detail=content&limit=500"
+    if kb_id:
+        params += f"&kb={kb_id}"
+    data = http_get(f"{base}{params}", api_key)
+    return data.get("items", [])
+
+
+def render_index(models: list[dict[str, Any]]) -> str:
+    """Render _index.md from a list of mental models."""
+    lines = ["# Knowledge Base Index", ""]
+    for mm in sorted(models, key=lambda m: m.get("name", "")):
+        mm_id = mm.get("id", "unknown")
+        name = mm.get("name", mm_id)
+        content = mm.get("content") or ""
+        # First non-empty line of content as summary
+        summary = ""
+        for line in content.split("\n"):
+            stripped = line.strip().lstrip("#").strip()
+            if stripped and not stripped.startswith("---"):
+                summary = stripped[:120]
+                break
+        lines.append(f"- [`{mm_id}.md`]({mm_id}.md) — {name}: {summary}")
+    lines.append("")
+    return "\n".join(lines)
+
+
+def render_mm_file(mm: dict[str, Any]) -> str:
+    """Render a mental model as a markdown file."""
+    content = mm.get("content") or "(no content yet)"
+    name = mm.get("name", mm.get("id", ""))
+    mm_id = mm.get("id", "")
+    last_refreshed = mm.get("last_refreshed_at", "")
+    tags = mm.get("tags") or []
+    kb_id = mm.get("kb_id") or ""
+
+    header_lines = [f"<!-- hindsight mental model: {mm_id} -->"]
+    if kb_id:
+        header_lines.append(f"<!-- kb: {kb_id} -->")
+    if last_refreshed:
+        header_lines.append(f"<!-- last refreshed: {last_refreshed} -->")
+    if tags:
+        header_lines.append(f"<!-- tags: {', '.join(tags)} -->")
+    header_lines.append("")
+
+    return "\n".join(header_lines) + content + "\n"
+
+
+def mount(
+    api_url: str,
+    api_key: str | None,
+    bank_id: str,
+    kb_id: str | None,
+    output_path: Path,
+) -> None:
+    """Sync mental models to local files."""
+    print(f"  fetching mental models from {api_url} (bank={bank_id}, kb={kb_id or 'all'})...")
+    try:
+        models = fetch_mental_models(api_url, api_key, bank_id, kb_id)
+    except urllib.error.HTTPError as e:
+        print(f"  error: HTTP {e.code} from {api_url}", file=sys.stderr)
+        sys.exit(1)
+    except urllib.error.URLError as e:
+        print(f"  error: cannot reach {api_url}: {e.reason}", file=sys.stderr)
+        sys.exit(1)
+
+    if not models:
+        print(f"  no mental models found (bank={bank_id}, kb={kb_id or 'all'})")
+        output_path.mkdir(parents=True, exist_ok=True)
+        (output_path / "_index.md").write_text("# Knowledge Base Index\n\n(empty)\n")
+        print(f"  wrote empty index to {output_path}/_index.md")
+        return
+
+    output_path.mkdir(parents=True, exist_ok=True)
+
+    # Write each MM as a file
+    written = []
+    for mm in models:
+        mm_id = mm.get("id", "unknown")
+        filename = f"{mm_id}.md"
+        filepath = output_path / filename
+        filepath.write_text(render_mm_file(mm))
+        written.append(mm_id)
+
+    # Write the index
+    (output_path / "_index.md").write_text(render_index(models))
+
+    # Clean up files that no longer have a corresponding MM
+    existing_files = {f.name for f in output_path.glob("*.md")} - {"_index.md"}
+    expected_files = {f"{mm_id}.md" for mm_id in written}
+    stale = existing_files - expected_files
+    for stale_file in stale:
+        (output_path / stale_file).unlink()
+        print(f"  removed stale: {stale_file}")
+
+    print(f"  mounted {len(written)} mental model(s) to {output_path}/")
+    for mm_id in written:
+        print(f"    {mm_id}.md")
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(
+        description="Mount a Hindsight Knowledge Base as local markdown files."
+    )
+    parser.add_argument("bank_id", help="Bank ID")
+    parser.add_argument("kb_id", nargs="?", default=None, help="Knowledge base ID (optional — mounts all MMs if omitted)")
+    parser.add_argument(
+        "--path",
+        type=Path,
+        default=None,
+        help="Output directory (default: ~/.agent-knowledge/<bank_id>/[<kb_id>/])",
+    )
+    parser.add_argument("--api-url", default=None, help="Hindsight API URL")
+    parser.add_argument("--api-key", default=None, help="Hindsight API key")
+
+    args = parser.parse_args()
+
+    cli_url, cli_key = load_cli_config()
+    api_url = args.api_url or cli_url
+    api_key = args.api_key or cli_key
+
+    if args.path:
+        output_path = args.path.expanduser()
+    else:
+        base = Path.home() / ".agent-knowledge" / args.bank_id
+        output_path = base / args.kb_id if args.kb_id else base
+
+    mount(api_url, api_key, args.bank_id, args.kb_id, output_path)
+
+
+if __name__ == "__main__":
+    main()

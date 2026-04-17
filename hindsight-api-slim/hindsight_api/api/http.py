@@ -3601,9 +3601,14 @@ def _register_routes(app: FastAPI):
     class CreateKnowledgeBaseRequest(BaseModel):
         id: str = Field(..., description="Knowledge base identifier (lowercase with hyphens)")
         name: str = Field("", description="Human-readable name")
-        mission: str = Field("", description="Policy for how to organize knowledge: what topics to maintain, when to create/split MMs, structural conventions")
+        mission: str = Field(
+            "",
+            description="Policy for how to organize knowledge: what topics to maintain, when to create/split MMs, structural conventions",
+        )
         tags: list[str] = Field(default_factory=list, description="Tags to scope which observations feed this KB")
-        auto_create: bool = Field(True, description="Auto-create new mental models when observations don't fit existing ones")
+        auto_create: bool = Field(
+            True, description="Auto-create new mental models when observations don't fit existing ones"
+        )
         split_threshold: int = Field(30, description="Max statements per mental model before proposing a split")
 
     class UpdateKnowledgeBaseRequest(BaseModel):
@@ -3872,6 +3877,7 @@ def _register_routes(app: FastAPI):
                 tags=body.tags if body.tags else None,
                 max_tokens=body.max_tokens,
                 trigger=body.trigger.model_dump() if body.trigger else None,
+                kb_id=body.kb_id,
                 request_context=request_context,
             )
             # 2. Schedule a refresh to generate the actual content
