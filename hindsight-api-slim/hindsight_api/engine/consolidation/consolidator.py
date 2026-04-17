@@ -745,26 +745,7 @@ async def _run_knowledge_base_updates(
         if not recent_obs:
             continue
 
-        # Pre-filter observations to exclude agent internals, identity, and
-        # delivered content. These pollute the KB update prompt and cause the
-        # LLM to create junk pages no matter how strict the prompt is.
-        _NOISE_PATTERNS = [
-            "agent's", "agent is", "agent should", "agent must",
-            "assistant", "AI agent", "soul file", "SOUL.md",
-            "CLI binary", "cli binary", "hindsight-cli",
-            "called Nicolò", "called nicolo", "user's name",
-            "user wishes to be called", "addressing",
-            "MEMORY.md", "SKILL.md", "BRIEF.md",
-            "tool to access", "tool to read",
-        ]
-        filtered_obs = [
-            r for r in recent_obs
-            if not any(pat.lower() in r["text"].lower() for pat in _NOISE_PATTERNS)
-        ]
-        if not filtered_obs:
-            continue
-
-        obs_summaries = [r["text"][:200] for r in filtered_obs]
+        obs_summaries = [r["text"][:200] for r in recent_obs]
 
         prompt = (
             "You are deciding whether a knowledge base needs NEW topic pages.\n\n"
