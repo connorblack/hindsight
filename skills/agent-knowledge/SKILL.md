@@ -33,7 +33,7 @@ If step 2 returns items, read the ones relevant to the current request (see "Rea
 
 **List all topic pages in your KB:**
 ```bash
-/Users/nicoloboschi/dev/hindsight-wt3/hindsight-cli/target/release/hindsight mental-model list nicolo-news-feed --kb news-feed --output json
+curl -sS "http://localhost:8888/v1/default/banks/nicolo-news-feed/mental-models?kb=news-feed&detail=content"
 ```
 
 **Read a specific topic page:**

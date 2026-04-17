@@ -750,27 +750,26 @@ async def _run_knowledge_base_updates(
         obs_summaries = [r["text"][:200] for r in recent_obs]
 
         prompt = (
-            "You are organizing a knowledge base into topic pages.\n\n"
+            "You are deciding whether a knowledge base needs NEW topic pages.\n\n"
             f"KB Mission: {mission}\n\n"
             f"Existing pages: {', '.join(existing_mm_names) if existing_mm_names else '(none yet)'}\n\n"
             f"Recent observations ({len(obs_summaries)}):\n"
             + "\n".join(f"- {s}" for s in obs_summaries[:20])
             + "\n\n"
-            "Should any new topic pages be created?\n\n"
-            "STRICT RULES:\n"
-            "1. ONLY create pages that directly serve the KB Mission above. "
-            "If an observation is interesting but outside the mission's scope, IGNORE IT.\n"
-            "2. Do NOT create pages about the agent's own behavior, identity, tool usage, "
-            "configuration, or internal workings — those are not knowledge pages.\n"
-            "3. Do NOT create pages about the content of task outputs (e.g., news articles the agent delivered). "
-            "Only create pages about the USER's preferences, rules, procedures, and decisions.\n"
-            "4. Only suggest a page if observations clearly cover a topic NOT already handled by an existing page.\n"
-            "5. Prefer fewer, broader pages over many narrow ones. When in doubt, return [].\n\n"
-            "The `source_query` field is a QUESTION that will be asked to the memory system to synthesize the page content. "
-            "It is NOT the content itself. Write it as a comprehensive question about the USER's preferences or procedures. "
-            'Example: "What are the user\'s current preferences for their AI news feed — topics, sources, format, depth, item cap, and voice?"\n\n'
-            'Respond ONLY with a JSON array: [{"id": "lowercase-with-hyphens", "name": "Human Readable Name", "source_query": "A comprehensive question..."}]\n'
-            "If no new pages are needed, respond with an empty array: []\n"
+            "Your job: decide if any NEW pages are needed. The DEFAULT answer is [] (no new pages).\n\n"
+            "ONLY create a new page when ALL of these are true:\n"
+            "- The topic is explicitly part of the KB Mission\n"
+            "- There are multiple observations about the USER's preferences or decisions on this topic\n"
+            "- No existing page already covers this topic (even partially)\n\n"
+            "NEVER create pages for:\n"
+            "- News articles, product releases, or information the agent delivered to the user\n"
+            "- The agent's own identity, behavior, configuration, tools, or internal workings\n"
+            "- The user's name, personal details, or how to address them\n"
+            "- Anything with fewer than 3 supporting observations\n\n"
+            "The `source_query` must be a QUESTION about what the user wants/prefers, not a summary of facts. "
+            'Example: "What are the user\'s preferences for news feed format, depth, and item count?"\n\n'
+            'Respond ONLY with a JSON array: [{"id": "lowercase-with-hyphens", "name": "Human Readable Name", "source_query": "Question about user preferences..."}]\n'
+            "Almost always the right answer is: []\n"
             "Do not include any other text."
         )
 
