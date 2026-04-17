@@ -612,9 +612,20 @@ async def run_consolidation_job(
     # Trigger mental model refreshes only on the final round (when all memories are processed).
     # If we hit the round limit and re-queued, skip MM refresh — the next round will handle it.
     if hit_round_limit:
+        stats["knowledge_base_updates"] = 0
         stats["mental_models_refreshed"] = 0
-        logger.info(f"[CONSOLIDATION] bank={bank_id} skipping mental model refresh (round limit hit, re-queued)")
+        logger.info(f"[CONSOLIDATION] bank={bank_id} skipping KB updates and mental model refresh (round limit hit, re-queued)")
     else:
+        # Run knowledge base updates: decide whether to create/reorganize MMs based on new observations
+        kb_updates = await _run_knowledge_base_updates(
+            memory_engine=memory_engine,
+            bank_id=bank_id,
+            request_context=request_context,
+            consolidated_tags=list(consolidated_tags) if consolidated_tags else None,
+            perf=perf,
+        )
+        stats["knowledge_base_updates"] = kb_updates
+
         # SECURITY: Only refresh mental models with matching tags (or all if no tags were consolidated)
         mental_models_refreshed = await _trigger_mental_model_refreshes(
             memory_engine=memory_engine,
@@ -628,6 +639,186 @@ async def run_consolidation_job(
     perf.flush()
 
     return {"status": "completed", "bank_id": bank_id, **stats}
+
+
+async def _run_knowledge_base_updates(
+    memory_engine: "MemoryEngine",
+    bank_id: str,
+    request_context: "RequestContext",
+    consolidated_tags: list[str] | None = None,
+    perf: ConsolidationPerfLog | None = None,
+) -> dict:
+    """Run knowledge base updates after consolidation.
+
+    For each KB in the bank whose tags overlap with the consolidated tags,
+    use the KB's mission + existing MM list + recent observations to decide:
+    1. Whether new mental models should be created
+    2. Whether existing mental models should be reorganized
+
+    Then trigger auto-refresh on all affected MMs (the existing
+    _trigger_mental_model_refreshes handles the actual refresh).
+
+    This operation does NOT route individual observations to specific MMs.
+    Routing happens implicitly through each MM's source_query + tags during
+    the refresh cycle. The KB update decides the *structure* (which MMs
+    exist); the refresh decides the *content* (what each MM says).
+
+    Args:
+        memory_engine: MemoryEngine instance
+        bank_id: Bank identifier
+        request_context: Request context for authentication
+        consolidated_tags: Tags from memories that were consolidated
+        perf: Performance logging
+
+    Returns:
+        Dict with stats: kbs_evaluated, mms_created, kbs_skipped
+    """
+    pool = memory_engine._pool
+    stats = {"kbs_evaluated": 0, "mms_created": 0, "kbs_skipped": 0}
+
+    # Find KBs whose tags overlap with consolidated tags
+    async with pool.acquire() as conn:
+        if consolidated_tags:
+            kbs = await conn.fetch(
+                f"""
+                SELECT id, name, mission, tags, auto_create, split_threshold
+                FROM {fq_table("knowledge_bases")}
+                WHERE bank_id = $1
+                  AND (
+                    (tags IS NOT NULL AND tags != '{{}}' AND tags && $2::varchar[])
+                    OR (tags IS NULL OR tags = '{{}}')
+                  )
+                """,
+                bank_id,
+                consolidated_tags,
+            )
+        else:
+            kbs = await conn.fetch(
+                f"""
+                SELECT id, name, mission, tags, auto_create, split_threshold
+                FROM {fq_table("knowledge_bases")}
+                WHERE bank_id = $1
+                """,
+                bank_id,
+            )
+
+    if not kbs:
+        return stats
+
+    for kb_row in kbs:
+        kb_id = kb_row["id"]
+        mission = kb_row["mission"] or ""
+        auto_create = kb_row["auto_create"]
+
+        if not auto_create:
+            stats["kbs_skipped"] += 1
+            continue
+
+        if not mission.strip():
+            # No mission = no way to decide what MMs to create
+            stats["kbs_skipped"] += 1
+            continue
+
+        stats["kbs_evaluated"] += 1
+
+        # Get existing MMs in this KB
+        existing_mms = await memory_engine.list_mental_models(
+            bank_id, kb_id=kb_id, detail="metadata", request_context=request_context
+        )
+        existing_mm_names = [mm["name"] for mm in existing_mms]
+
+        # Get recent observations (last consolidation batch)
+        pool2 = await memory_engine._get_pool()
+        async with pool2.acquire() as conn2:
+            recent_obs = await conn2.fetch(
+                f"""
+                SELECT id, text, tags
+                FROM {fq_table("memory_units")}
+                WHERE bank_id = $1
+                  AND fact_type = 'observation'
+                ORDER BY created_at DESC
+                LIMIT 50
+                """,
+                bank_id,
+            )
+
+        if not recent_obs:
+            continue
+
+        # Ask the LLM: given the KB mission, existing MMs, and recent observations,
+        # should any new MMs be created?
+        obs_summaries = [r["text"][:200] for r in recent_obs]
+
+        prompt = (
+            f"You are organizing a knowledge base.\n\n"
+            f"KB Mission: {mission}\n\n"
+            f"Existing pages: {', '.join(existing_mm_names) if existing_mm_names else '(none yet)'}\n\n"
+            f"Recent observations ({len(obs_summaries)}):\n" + "\n".join(f"- {s}" for s in obs_summaries[:20]) + "\n\n"
+            "Based on the mission and these observations, should any new pages be created?\n"
+            "Only suggest a new page if observations clearly cover a topic NOT already handled by an existing page.\n"
+            'Respond ONLY with a JSON array of objects: [{"id": "page-id", "name": "Page Name", "source_query": "The query..."}]\n'
+            "If no new pages are needed, respond with an empty array: []\n"
+            "Do not include any other text."
+        )
+
+        try:
+            from hindsight_api.engine.llm_wrapper import call_llm
+
+            llm_response = await call_llm(
+                memory_engine._llm_config,
+                [{"role": "user", "content": prompt}],
+                max_tokens=1000,
+                temperature=0.2,
+            )
+
+            response_text = llm_response.get("content", "").strip()
+            # Parse JSON from LLM response
+            import re
+
+            json_match = re.search(r"\[.*\]", response_text, re.DOTALL)
+            if json_match:
+                new_mms = json.loads(json_match.group(0))
+            else:
+                new_mms = []
+
+            for mm_spec in new_mms:
+                mm_id = mm_spec.get("id")
+                mm_name = mm_spec.get("name", mm_id)
+                source_query = mm_spec.get("source_query", "")
+                if not mm_id or not source_query:
+                    continue
+
+                # Check for duplicates
+                if mm_id in [mm["id"] for mm in existing_mms]:
+                    continue
+
+                try:
+                    await memory_engine.create_mental_model(
+                        bank_id,
+                        mm_name,
+                        source_query,
+                        "Generating content...",
+                        mental_model_id=mm_id,
+                        kb_id=kb_id,
+                        trigger={"refresh_after_consolidation": True},
+                        request_context=request_context,
+                    )
+                    stats["mms_created"] += 1
+                    logger.info(f"[KB_UPDATE] Created MM '{mm_id}' in KB '{kb_id}' for bank {bank_id}")
+                except Exception as e:
+                    logger.warning(f"[KB_UPDATE] Failed to create MM '{mm_id}': {e}")
+
+        except Exception as e:
+            logger.warning(f"[KB_UPDATE] LLM call failed for KB '{kb_id}': {e}")
+            continue
+
+    if perf and (stats["kbs_evaluated"] > 0 or stats["mms_created"] > 0):
+        perf.log(
+            f"[4.5] KB updates: {stats['kbs_evaluated']} KBs evaluated, "
+            f"{stats['mms_created']} new MMs created, {stats['kbs_skipped']} skipped"
+        )
+
+    return stats
 
 
 async def _trigger_mental_model_refreshes(
