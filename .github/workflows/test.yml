@@ -1097,19 +1097,6 @@ jobs:
         print('Models downloaded successfully')
         "
 
-    - name: Wait for Oracle to be ready
-      run: |
-        echo "Waiting for Oracle 23ai Free to be fully ready..."
-        for i in $(seq 1 30); do
-          if docker exec $(docker ps -q --filter "ancestor=container-registry.oracle.com/database/free:latest") \
-            bash -c "echo 'SELECT 1 FROM DUAL;' | sqlplus -s system/oracle@localhost:1521/FREEPDB1" 2>/dev/null | grep -q "1"; then
-            echo "Oracle is ready!"
-            break
-          fi
-          echo "Attempt $i/30 — waiting..."
-          sleep 10
-        done
-
     - name: Run Oracle tests
       working-directory: ./hindsight-api-slim
       run: uv run pytest tests -v -m oracle
