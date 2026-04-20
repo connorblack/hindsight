@@ -595,13 +595,19 @@ class MemoryEngine(MemoryEngineInterface):
         # Initialize cross-encoder reranker (cached for performance)
         self._cross_encoder_reranker = CrossEncoderReranker(cross_encoder=cross_encoder)
 
-        # Initialize task backend
-        # If no custom backend provided, use BrokerTaskBackend which stores tasks in PostgreSQL
-        # The pool_getter lambda will return the pool once it's initialized
-        self._task_backend = task_backend or BrokerTaskBackend(
-            pool_getter=lambda: self._backend,
-            schema_getter=get_current_schema,
-        )
+        # Initialize task backend.
+        # Oracle doesn't support the async worker/poller yet (it uses raw asyncpg
+        # pool APIs and PG-specific SQL), so we use SyncTaskBackend which executes
+        # tasks inline. PG uses BrokerTaskBackend + WorkerPoller for background execution.
+        if task_backend:
+            self._task_backend = task_backend
+        elif config.database_backend == "oracle":
+            self._task_backend = SyncTaskBackend()
+        else:
+            self._task_backend = BrokerTaskBackend(
+                pool_getter=lambda: self._backend,
+                schema_getter=get_current_schema,
+            )
 
         # Audit logger for feature usage tracking
         config = get_config()
