@@ -8,8 +8,6 @@ image: /img/blog/guide-openclaw-shared-memory-across-agents.png
 hide_table_of_contents: true
 ---
 
-![OpenClaw Shared Memory Across Agents Guide](/img/blog/guide-openclaw-shared-memory-across-agents.png)
-
 If you want **OpenClaw shared memory across agents**, the real question is not whether Hindsight can do it. It can. The question is how much of the default bank-isolation scheme you want to keep. Out of the box, the OpenClaw plugin isolates memory by `agent`, `channel`, and `user`, which is a safe starting point but also means two agents can talk to the same human and still behave like strangers.
 
 That default is useful when each agent should keep a separate brain. It is the wrong layout when you deliberately want a support bot, an operations bot, and a personal assistant to share the same user context. In that case, the fix is simple: remove `agent` from the bank key, keep the user dimension, and make sure every agent points at the same Hindsight backend.

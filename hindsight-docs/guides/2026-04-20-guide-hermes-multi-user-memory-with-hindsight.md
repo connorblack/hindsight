@@ -8,8 +8,6 @@ image: /img/blog/guide-hermes-multi-user-memory-with-hindsight.png
 hide_table_of_contents: true
 ---
 
-![Hermes Multi-User Memory Setup with Hindsight](/img/blog/guide-hermes-multi-user-memory-with-hindsight.png)
-
 If you want **Hermes multi-user memory with Hindsight**, the design decision that matters most is not `memory_mode`. It is how you derive `bank_id` for each user. A single static bank is fine for a personal assistant. It is risky in a multi-user deployment, because recall gets better only when the bank contains the right person's history.
 
 The safe rule is simple: one user, one bank identity. In practice that usually means deriving `bank_id` from a stable user identifier, and often a tenant identifier too, then passing that value into the Hermes Hindsight provider for each session. Once that is in place, recall stays relevant and memory isolation becomes much easier to reason about.

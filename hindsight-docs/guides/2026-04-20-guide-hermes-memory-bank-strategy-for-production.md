@@ -8,8 +8,6 @@ image: /img/blog/guide-hermes-memory-bank-strategy-for-production.png
 hide_table_of_contents: true
 ---
 
-![Hermes Memory Bank Strategy for Production](/img/blog/guide-hermes-memory-bank-strategy-for-production.png)
-
 If you are designing a **Hermes memory bank strategy for production**, the part that matters most is not the model choice. It is how you divide memory space across users, teams, and environments. That one decision controls recall quality, isolation safety, and how easy the system is to debug when something looks wrong.
 
 The mistake I see most often is choosing one bank too early, then stretching it across unrelated workflows. That feels simple at first, but it turns recall into a grab bag. The healthier approach is to pick a bank naming scheme that matches how the agent will actually be used, then keep the scheme stable over time.

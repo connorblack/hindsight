@@ -8,8 +8,6 @@ image: /img/blog/guide-openclaw-and-claude-code-shared-memory.png
 hide_table_of_contents: true
 ---
 
-![OpenClaw and Claude Code Shared Memory Setup](/img/blog/guide-openclaw-and-claude-code-shared-memory.png)
-
 If you want **OpenClaw and Claude Code shared memory**, the trick is not installing another memory system. It is making both tools point at the same Hindsight bank on purpose. Once that is true, context learned in chat can show up in coding sessions, and discoveries from coding sessions can come back into chat without anyone retyping the whole backstory.
 
 This setup is useful when one workflow spans both tools. You might discuss product requirements with an OpenClaw assistant, switch to Claude Code to implement them, then return to OpenClaw for status updates. Without shared memory, each tool starts from zero. With a shared bank, they can reuse the same project facts, preferences, and working context.

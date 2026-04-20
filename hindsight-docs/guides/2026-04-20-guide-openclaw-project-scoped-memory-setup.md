@@ -8,8 +8,6 @@ image: /img/blog/guide-openclaw-project-scoped-memory-setup.png
 hide_table_of_contents: true
 ---
 
-![OpenClaw Project-Scoped Memory Setup Guide](/img/blog/guide-openclaw-project-scoped-memory-setup.png)
-
 If you want **OpenClaw project-scoped memory**, the goal is simple: when the agent is working on Project A, it should not recall facts from Project B. In practice, the cleanest way to get that behavior is to give each project its own bank, either with a fixed `bankId` per project agent or with a deliberate deployment pattern that maps one agent instance to one project.
 
 This is different from per-user memory. Per-user memory answers “who is talking?” Project-scoped memory answers “which body of work should this conversation draw from?” If your OpenClaw setup supports several repos, products, or client environments, project scoping often matters more than user scoping.

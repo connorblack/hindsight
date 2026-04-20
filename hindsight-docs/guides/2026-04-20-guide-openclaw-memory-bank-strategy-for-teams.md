@@ -8,8 +8,6 @@ image: /img/blog/guide-openclaw-memory-bank-strategy-for-teams.png
 hide_table_of_contents: true
 ---
 
-![OpenClaw Memory Bank Strategy for Teams](/img/blog/guide-openclaw-memory-bank-strategy-for-teams.png)
-
 If you are choosing an **OpenClaw memory bank strategy for teams**, the important question is not “should we use memory?” It is “what should count as one memory space?” That answer determines whether recall feels focused, whether team context compounds usefully, and whether one user's chat history stays out of another user's answers.
 
 OpenClaw gives you several viable patterns through Hindsight bank configuration. You can isolate per user, per provider, per channel, or collapse down to one intentionally shared bank for a team workflow. None of those options is universally right. The best choice depends on whether your agents serve individuals, shared queues, or a small team working on one project together.

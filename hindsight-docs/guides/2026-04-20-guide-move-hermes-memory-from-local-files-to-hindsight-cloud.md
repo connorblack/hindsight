@@ -8,8 +8,6 @@ image: /img/blog/guide-move-hermes-memory-from-local-files-to-hindsight-cloud.pn
 hide_table_of_contents: true
 ---
 
-![Move Hermes Memory to Hindsight Cloud Guide](/img/blog/guide-move-hermes-memory-from-local-files-to-hindsight-cloud.png)
-
 If you want to **move Hermes memory from local files to Hindsight Cloud**, the migration is mostly about separating two kinds of memory that used to live together. Hermes can keep its local, bounded file memory for agent-local context, while Hindsight Cloud becomes the durable long-term memory backend that survives sessions and scales better across devices or shared workflows.
 
 The important part is not copying every local artifact byte for byte. It is preserving the durable facts you actually care about, then pointing Hermes at the managed Hindsight backend so future retention and recall happen there. In practice, that means backing up your current Hermes memory files, switching the provider config to Cloud, and validating recall with a few known facts before you fully trust the new path.

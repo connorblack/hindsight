@@ -8,8 +8,6 @@ image: /img/blog/guide-hermes-shared-memory-across-agents.png
 hide_table_of_contents: true
 ---
 
-![Hermes Shared Memory Across Agents Setup](/img/blog/guide-hermes-shared-memory-across-agents.png)
-
 If you want **Hermes shared memory across agents**, the setup is much simpler than most people expect. Multiple agents do not need a special federation layer. They just need to point at the same Hindsight backend and the same `bank_id`. Once that happens, the agents can retrieve and retain against the same memory space.
 
 That simplicity is powerful, but it also means you need to be intentional. Shared memory only improves outcomes when the participating agents truly belong to the same workflow. If two unrelated agents write into the same bank, recall gets noisy fast. If two cooperating agents share a bank with a focused mission, the effect is the opposite, each one becomes smarter because it can build on what the others already learned.
