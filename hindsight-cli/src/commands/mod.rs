@@ -6,7 +6,6 @@ pub mod document;
 pub mod entity;
 pub mod explore;
 pub mod health;
-pub mod kb;
 pub mod memory;
 pub mod mental_model;
 pub mod operation;

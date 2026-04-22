@@ -74,61 +74,6 @@ pub struct OperationsResponse {
     pub operations: Vec<Operation>,
 }
 
-// --- Knowledge Base Types ---
-
-#[derive(Debug, Serialize, Deserialize)]
-pub struct CreateKnowledgeBaseRequest {
-    pub id: String,
-    pub name: String,
-    pub mission: String,
-    pub tags: Vec<String>,
-    pub auto_create: bool,
-    pub split_threshold: i32,
-}
-
-#[derive(Debug, Serialize, Deserialize)]
-pub struct KnowledgeBase {
-    pub id: String,
-    pub bank_id: String,
-    pub name: String,
-    pub mission: String,
-    #[serde(default)]
-    pub tags: Vec<String>,
-    #[serde(default)]
-    pub auto_create: bool,
-    #[serde(default)]
-    pub split_threshold: i32,
-    pub created_at: Option<String>,
-    pub updated_at: Option<String>,
-    pub mental_model_count: Option<i64>,
-    pub mental_models: Option<Vec<KbMentalModel>>,
-}
-
-#[derive(Debug, Serialize, Deserialize)]
-pub struct KbMentalModel {
-    pub id: String,
-    pub name: String,
-}
-
-#[derive(Debug, Serialize, Deserialize)]
-pub struct KnowledgeBaseListResponse {
-    pub items: Vec<KnowledgeBase>,
-}
-
-#[derive(Debug, Serialize, Deserialize)]
-pub struct UpdateKnowledgeBaseRequest {
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub name: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub mission: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub tags: Option<Vec<String>>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub auto_create: Option<bool>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub split_threshold: Option<i32>,
-}
-
 #[derive(Debug, Serialize, Deserialize)]
 pub struct TraceInfo {
     pub total_time: Option<f64>,
@@ -817,31 +762,14 @@ impl ApiClient {
     pub fn list_mental_models(
         &self,
         bank_id: &str,
-        kb: Option<&str>,
         _verbose: bool,
     ) -> Result<types::MentalModelListResponse> {
         self.runtime.block_on(async {
-            if let Some(kb_id) = kb {
-                // Use raw HTTP to pass kb filter (not in generated client)
-                let url = format!(
-                    "{}/v1/default/banks/{}/mental-models?kb={}&detail=full",
-                    self.base_url, bank_id, kb_id
-                );
-                let mut req = self.http_client.get(&url);
-                // Auth already in http_client default headers
-                if false {
-                    // unused
-                }
-                let resp = req.send().await?;
-                let body: types::MentalModelListResponse = resp.json().await?;
-                Ok(body)
-            } else {
-                let response = self
-                    .client
-                    .list_mental_models(bank_id, None, None, None, None, None, None)
-                    .await?;
-                Ok(response.into_inner())
-            }
+            let response = self
+                .client
+                .list_mental_models(bank_id, None, None, None, None, None, None)
+                .await?;
+            Ok(response.into_inner())
         })
     }
 
@@ -864,38 +792,14 @@ impl ApiClient {
         &self,
         bank_id: &str,
         request: &types::CreateMentalModelRequest,
-        kb_id: Option<&str>,
         _verbose: bool,
     ) -> Result<types::CreateMentalModelResponse> {
         self.runtime.block_on(async {
-            if let Some(kb) = kb_id {
-                // Use raw HTTP to pass kb_id (not in generated client types)
-                let url = format!(
-                    "{}/v1/default/banks/{}/mental-models",
-                    self.base_url, bank_id
-                );
-                let mut body = serde_json::to_value(request)?;
-                body["kb_id"] = serde_json::Value::String(kb.to_string());
-                let mut req = self.http_client.post(&url).json(&body);
-                // Auth already in http_client default headers
-                if false {
-                    // unused
-                }
-                let resp = req.send().await?;
-                if !resp.status().is_success() {
-                    let status = resp.status();
-                    let text = resp.text().await.unwrap_or_default();
-                    anyhow::bail!("HTTP {}: {}", status, text);
-                }
-                let result: types::CreateMentalModelResponse = resp.json().await?;
-                Ok(result)
-            } else {
-                let response = self
-                    .client
-                    .create_mental_model(bank_id, None, request)
-                    .await?;
-                Ok(response.into_inner())
-            }
+            let response = self
+                .client
+                .create_mental_model(bank_id, None, request)
+                .await?;
+            Ok(response.into_inner())
         })
     }
 
@@ -1345,137 +1249,6 @@ impl ApiClient {
                 .update_bank_disposition(bank_id, None, &request)
                 .await?;
             Ok(response.into_inner())
-        })
-    }
-
-    // --- Knowledge Base Methods ---
-
-    pub fn list_knowledge_bases(
-        &self,
-        bank_id: &str,
-        verbose: bool,
-    ) -> Result<KnowledgeBaseListResponse> {
-        self.runtime.block_on(async {
-            let url = format!(
-                "{}/v1/default/banks/{}/knowledge-bases",
-                self.base_url, bank_id
-            );
-            if verbose {
-                eprintln!("GET {}", url);
-            }
-            let response = self.http_client.get(&url).send().await?;
-            if !response.status().is_success() {
-                let status = response.status();
-                let text = response.text().await.unwrap_or_default();
-                anyhow::bail!("List knowledge bases failed ({}): {}", status, text);
-            }
-            let result: KnowledgeBaseListResponse = response.json().await?;
-            Ok(result)
-        })
-    }
-
-    pub fn get_knowledge_base(
-        &self,
-        bank_id: &str,
-        kb_id: &str,
-        verbose: bool,
-    ) -> Result<KnowledgeBase> {
-        self.runtime.block_on(async {
-            let url = format!(
-                "{}/v1/default/banks/{}/knowledge-bases/{}",
-                self.base_url, bank_id, kb_id
-            );
-            if verbose {
-                eprintln!("GET {}", url);
-            }
-            let response = self.http_client.get(&url).send().await?;
-            if !response.status().is_success() {
-                let status = response.status();
-                let text = response.text().await.unwrap_or_default();
-                anyhow::bail!("Get knowledge base failed ({}): {}", status, text);
-            }
-            let result: KnowledgeBase = response.json().await?;
-            Ok(result)
-        })
-    }
-
-    pub fn create_knowledge_base(
-        &self,
-        bank_id: &str,
-        request: &CreateKnowledgeBaseRequest,
-        verbose: bool,
-    ) -> Result<KnowledgeBase> {
-        self.runtime.block_on(async {
-            let url = format!(
-                "{}/v1/default/banks/{}/knowledge-bases",
-                self.base_url, bank_id
-            );
-            if verbose {
-                eprintln!("POST {}", url);
-            }
-            let response = self.http_client.post(&url).json(request).send().await?;
-            if !response.status().is_success() {
-                let status = response.status();
-                let text = response.text().await.unwrap_or_default();
-                anyhow::bail!("Create knowledge base failed ({}): {}", status, text);
-            }
-            let result: KnowledgeBase = response.json().await?;
-            Ok(result)
-        })
-    }
-
-    pub fn update_knowledge_base(
-        &self,
-        bank_id: &str,
-        kb_id: &str,
-        request: &UpdateKnowledgeBaseRequest,
-        verbose: bool,
-    ) -> Result<KnowledgeBase> {
-        self.runtime.block_on(async {
-            let url = format!(
-                "{}/v1/default/banks/{}/knowledge-bases/{}",
-                self.base_url, bank_id, kb_id
-            );
-            if verbose {
-                eprintln!("PATCH {}", url);
-            }
-            let response = self.http_client.patch(&url).json(request).send().await?;
-            if !response.status().is_success() {
-                let status = response.status();
-                let text = response.text().await.unwrap_or_default();
-                anyhow::bail!("Update knowledge base failed ({}): {}", status, text);
-            }
-            let result: KnowledgeBase = response.json().await?;
-            Ok(result)
-        })
-    }
-
-    pub fn delete_knowledge_base(
-        &self,
-        bank_id: &str,
-        kb_id: &str,
-        delete_mental_models: bool,
-        verbose: bool,
-    ) -> Result<serde_json::Value> {
-        self.runtime.block_on(async {
-            let mut url = format!(
-                "{}/v1/default/banks/{}/knowledge-bases/{}",
-                self.base_url, bank_id, kb_id
-            );
-            if delete_mental_models {
-                url.push_str("?delete_mental_models=true");
-            }
-            if verbose {
-                eprintln!("DELETE {}", url);
-            }
-            let response = self.http_client.delete(&url).send().await?;
-            if !response.status().is_success() {
-                let status = response.status();
-                let text = response.text().await.unwrap_or_default();
-                anyhow::bail!("Delete knowledge base failed ({}): {}", status, text);
-            }
-            let result: serde_json::Value = response.json().await.unwrap_or(serde_json::json!({"success": true}));
-            Ok(result)
         })
     }
 }

@@ -101,10 +101,6 @@ enum Commands {
     #[command(subcommand)]
     Operation(OperationCommands),
 
-    /// Manage knowledge bases
-    #[command(subcommand)]
-    Kb(KbCommands),
-
     /// Manage mental models (user-curated summaries)
     #[command(subcommand)]
     MentalModel(MentalModelCommands),
@@ -962,10 +958,6 @@ enum MentalModelCommands {
     List {
         /// Bank ID
         bank_id: String,
-
-        /// Filter by knowledge base ID
-        #[arg(long)]
-        kb: Option<String>,
     },
 
     /// Get a specific mental model
@@ -1003,10 +995,6 @@ enum MentalModelCommands {
         /// Refresh this mental model automatically after observations consolidation
         #[arg(long)]
         trigger_refresh_after_consolidation: bool,
-
-        /// Knowledge base ID to associate this mental model with
-        #[arg(long)]
-        kb: Option<String>,
     },
 
     /// Update a mental model
@@ -1067,99 +1055,6 @@ enum MentalModelCommands {
 
         /// Mental model ID
         mental_model_id: String,
-    },
-}
-
-#[derive(Subcommand)]
-enum KbCommands {
-    /// List knowledge bases for a bank
-    List {
-        /// Bank ID
-        bank_id: String,
-    },
-
-    /// Get a specific knowledge base
-    Get {
-        /// Bank ID
-        bank_id: String,
-
-        /// Knowledge base ID
-        kb_id: String,
-    },
-
-    /// Create a new knowledge base
-    Create {
-        /// Bank ID
-        bank_id: String,
-
-        /// Knowledge base ID
-        kb_id: String,
-
-        /// Knowledge base name
-        #[arg(long)]
-        name: String,
-
-        /// Mission statement for the knowledge base
-        #[arg(long)]
-        mission: String,
-
-        /// Tags (comma-separated)
-        #[arg(long, value_delimiter = ',')]
-        tags: Vec<String>,
-
-        /// Auto-create mental models
-        #[arg(long)]
-        auto_create: bool,
-
-        /// Split threshold for mental models
-        #[arg(long, default_value = "0")]
-        split_threshold: i32,
-    },
-
-    /// Update a knowledge base
-    Update {
-        /// Bank ID
-        bank_id: String,
-
-        /// Knowledge base ID
-        kb_id: String,
-
-        /// New name
-        #[arg(long)]
-        name: Option<String>,
-
-        /// New mission
-        #[arg(long)]
-        mission: Option<String>,
-
-        /// Replace tags (comma-separated)
-        #[arg(long, value_delimiter = ',')]
-        tags: Option<Vec<String>>,
-
-        /// Enable/disable auto-create
-        #[arg(long)]
-        auto_create: Option<bool>,
-
-        /// New split threshold
-        #[arg(long)]
-        split_threshold: Option<i32>,
-    },
-
-    /// Delete a knowledge base
-    Delete {
-        /// Bank ID
-        bank_id: String,
-
-        /// Knowledge base ID
-        kb_id: String,
-
-        /// Also delete associated mental models
-        #[arg(long)]
-        delete_mental_models: bool,
-
-        /// Skip confirmation prompt
-        #[arg(short = 'y', long)]
-        yes: bool,
     },
 }
 
@@ -1699,74 +1594,10 @@ fn run() -> Result<()> {
             }
         },
 
-        // Knowledge base commands
-        Commands::Kb(kb_cmd) => match kb_cmd {
-            KbCommands::List { bank_id } => {
-                commands::kb::list(&client, &bank_id, verbose, output_format)
-            }
-            KbCommands::Get { bank_id, kb_id } => {
-                commands::kb::get(&client, &bank_id, &kb_id, verbose, output_format)
-            }
-            KbCommands::Create {
-                bank_id,
-                kb_id,
-                name,
-                mission,
-                tags,
-                auto_create,
-                split_threshold,
-            } => commands::kb::create(
-                &client,
-                &bank_id,
-                &kb_id,
-                &name,
-                &mission,
-                tags,
-                auto_create,
-                split_threshold,
-                verbose,
-                output_format,
-            ),
-            KbCommands::Update {
-                bank_id,
-                kb_id,
-                name,
-                mission,
-                tags,
-                auto_create,
-                split_threshold,
-            } => commands::kb::update(
-                &client,
-                &bank_id,
-                &kb_id,
-                name,
-                mission,
-                tags,
-                auto_create,
-                split_threshold,
-                verbose,
-                output_format,
-            ),
-            KbCommands::Delete {
-                bank_id,
-                kb_id,
-                delete_mental_models,
-                yes,
-            } => commands::kb::delete(
-                &client,
-                &bank_id,
-                &kb_id,
-                delete_mental_models,
-                yes,
-                verbose,
-                output_format,
-            ),
-        },
-
         // Mental model commands
         Commands::MentalModel(mm_cmd) => match mm_cmd {
-            MentalModelCommands::List { bank_id, kb } => {
-                commands::mental_model::list(&client, &bank_id, kb.as_deref(), verbose, output_format)
+            MentalModelCommands::List { bank_id } => {
+                commands::mental_model::list(&client, &bank_id, verbose, output_format)
             }
             MentalModelCommands::Get {
                 bank_id,
@@ -1786,7 +1617,6 @@ fn run() -> Result<()> {
                 tags,
                 max_tokens,
                 trigger_refresh_after_consolidation,
-                kb,
             } => commands::mental_model::create(
                 &client,
                 &bank_id,
@@ -1796,7 +1626,6 @@ fn run() -> Result<()> {
                 tags,
                 max_tokens,
                 trigger_refresh_after_consolidation,
-                kb.as_deref(),
                 verbose,
                 output_format,
             ),

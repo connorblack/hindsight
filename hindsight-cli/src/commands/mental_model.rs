@@ -12,7 +12,6 @@ use hindsight_client::types;
 pub fn list(
     client: &ApiClient,
     bank_id: &str,
-    kb: Option<&str>,
     verbose: bool,
     output_format: OutputFormat,
 ) -> Result<()> {
@@ -22,7 +21,7 @@ pub fn list(
         None
     };
 
-    let response = client.list_mental_models(bank_id, kb, verbose);
+    let response = client.list_mental_models(bank_id, verbose);
 
     if let Some(mut sp) = spinner {
         sp.finish();
@@ -106,7 +105,6 @@ pub fn create(
     tags: Vec<String>,
     max_tokens: i64,
     trigger_refresh_after_consolidation: bool,
-    kb: Option<&str>,
     verbose: bool,
     output_format: OutputFormat,
 ) -> Result<()> {
@@ -144,7 +142,7 @@ pub fn create(
         trigger,
     };
 
-    let response = client.create_mental_model(bank_id, &request, kb, verbose);
+    let response = client.create_mental_model(bank_id, &request, verbose);
 
     if let Some(mut sp) = spinner {
         sp.finish();
