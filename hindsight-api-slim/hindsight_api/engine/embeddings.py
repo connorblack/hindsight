@@ -911,8 +911,8 @@ class GeminiEmbeddings(Embeddings):
         vertexai_region: str | None = None,
         vertexai_service_account_key: str | None = None,
         output_dimensionality: int | None = None,
-        force_ipv4: bool = False,
         batch_size: int = 100,
+        force_ipv4: bool = False,
     ):
         self.model = model
         self.api_key = api_key
@@ -920,8 +920,8 @@ class GeminiEmbeddings(Embeddings):
         self.vertexai_region = vertexai_region or "us-central1"
         self.vertexai_service_account_key = vertexai_service_account_key
         self.output_dimensionality = output_dimensionality
-        self.force_ipv4 = force_ipv4
         self.batch_size = batch_size
+        self.force_ipv4 = force_ipv4
         self._client = None
         self._httpx_client = None
         self._dimension: int | None = None
