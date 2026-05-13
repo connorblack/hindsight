@@ -389,13 +389,12 @@ async def _execute_one_llm_batch(
     succeeded_ids: list[Any] = []
     failed_ids: list[Any] = []
 
-    # All memories in one llm_batch share the same tag set (enforced by tag_groups upstream),
-    # so observation_scopes is identical too — parse once for the whole batch.
+    # tag_groups upstream keys only on tags, not on observation_scopes — so
+    # observation_scopes can vary across sub_batches even though tags don't.
+    # Resolve obs_tags_list per sub_batch from sub_batch[0] to preserve
+    # per-memory scope semantics under adaptive split.
     shared_tags: list[str] = list(llm_batch[0].get("tags") or []) if llm_batch else []
     batch_tags: set[str] = set(shared_tags)
-    _obs_raw = llm_batch[0].get("observation_scopes") if llm_batch else None
-    _obs_parsed = json.loads(_obs_raw) if isinstance(_obs_raw, str) else _obs_raw
-    obs_tags_list = _resolve_obs_tags_list(shared_tags, _obs_parsed)
 
     pending: list[list[dict[str, Any]]] = [llm_batch]
     while pending:
@@ -404,6 +403,9 @@ async def _execute_one_llm_batch(
             break
 
         sub_batch = pending.pop(0)
+        _obs_raw = sub_batch[0].get("observation_scopes") if sub_batch else None
+        _obs_parsed = json.loads(_obs_raw) if isinstance(_obs_raw, str) else _obs_raw
+        obs_tags_list = _resolve_obs_tags_list(sub_batch[0].get("tags") or [] if sub_batch else [], _obs_parsed)
 
         # One conn per sub_batch (multi-pass consolidation reuses it across passes).
         async with acquire_with_retry(pool) as conn:
@@ -619,9 +621,12 @@ async def run_consolidation_job(
         # The tag-group security boundary is preserved: cross-tag memories never
         # share an LLM call.
         #
-        # The bound here stacks on top of the global LLM semaphore in
-        # llm_wrapper.py — effective concurrency is min(this, the global cap).
-        sem = asyncio.Semaphore(max(1, config.consolidation_llm_max_concurrent))
+        # consolidation_llm_max_concurrent is Optional[int] in HindsightConfig;
+        # fall back to the global llm_max_concurrent cap when unset. The bound
+        # here stacks on top of the global LLM semaphore in llm_wrapper.py —
+        # effective concurrency is min(this, the global cap).
+        consolidation_concurrency = config.consolidation_llm_max_concurrent or config.llm_max_concurrent
+        sem = asyncio.Semaphore(max(1, consolidation_concurrency))
 
         async def _bounded_batch(batch_num: int, batch: list[dict[str, Any]]) -> _BatchExecutionResult:
             async with sem:
@@ -637,14 +642,35 @@ async def run_consolidation_job(
                     operation_id=operation_id,
                 )
 
-        batch_results = await asyncio.gather(
-            *(_bounded_batch(num, batch) for num, batch in enumerate(llm_batches, start=llm_batch_num + 1))
+        # return_exceptions=True so a single batch failure does not cancel siblings
+        # mid-wave. Without this, gather's first-exception cancellation would skip
+        # the post-wave UPDATE, leaving observation rows already inserted by
+        # successful batches without their consolidated_at marker — those memories
+        # would be re-consolidated on the next run, producing duplicate observations.
+        gather_results = await asyncio.gather(
+            *(_bounded_batch(num, batch) for num, batch in enumerate(llm_batches, start=llm_batch_num + 1)),
+            return_exceptions=True,
         )
         llm_batch_num += len(llm_batches)
 
-        # Single DB commit for all succeeded/failed IDs across the wave.
-        # Each batch's IDs are disjoint by tag-grouping, so this matches the
-        # previous per-batch commits' effect with one round-trip instead of N.
+        batch_results: list[_BatchExecutionResult] = []
+        first_batch_exc: BaseException | None = None
+        for r in gather_results:
+            if isinstance(r, BaseException):
+                if first_batch_exc is None:
+                    first_batch_exc = r
+                else:
+                    logger.error(
+                        f"[CONSOLIDATION] bank={bank_id} additional batch exception suppressed: {r!r}",
+                        exc_info=r,
+                    )
+            else:
+                batch_results.append(r)
+
+        # Single DB commit for all succeeded/failed IDs across the wave's
+        # successful batches. Each batch's IDs are disjoint by tag-grouping;
+        # IDs from cancelled/raised batches are intentionally absent so those
+        # memories will be re-attempted on the next consolidation run.
         all_succeeded_ids: list[Any] = [mid for batch_result in batch_results for mid in batch_result.succeeded_ids]
         all_failed_ids: list[Any] = [mid for batch_result in batch_results for mid in batch_result.failed_ids]
         async with acquire_with_retry(pool) as conn:
@@ -692,6 +718,12 @@ async def run_consolidation_job(
                 f" | input_tokens=~{input_tokens}"
                 f" | avg={batch_result.elapsed / batch_result.memories_count:.3f}s/memory"
             )
+
+        # Re-raise the first batch exception now that DB state is consistent
+        # for everything that did succeed. The worker poller's standard
+        # exception handling marks the operation row failed for retry.
+        if first_batch_exc is not None:
+            raise first_batch_exc
 
         # End-of-wave checkpoint (per-sub-batch checks inside _execute_one_llm_batch
         # already shorten the in-wave cancellation window).
