@@ -1077,25 +1077,28 @@ async def _streaming_retain_batch(
         total_usage = total_usage + batch_usage
 
         if not batch_extracted:
-            # Even with 0 facts, the first batch must still run document tracking
-            # (cascade-delete + insert doc row) to establish ownership and prevent
-            # concurrent requests from interleaving. Later batches can safely skip.
-            if not doc_tracking_done[0]:
-                async with acquire_with_retry(pool) as conn:
-                    async with conn.transaction():
-                        await conn.execute(
-                            f"INSERT INTO {fq_table('documents')} (id, bank_id, original_text, content_hash) "
-                            f"VALUES ($1, $2, '', '__pending__') "
-                            f"ON CONFLICT (id, bank_id) DO NOTHING",
-                            effective_doc_id,
-                            bank_id,
-                        )
-                        await conn.fetchval(
-                            f"SELECT content_hash FROM {fq_table('documents')} "
-                            f"WHERE id = $1 AND bank_id = $2 FOR UPDATE",
-                            effective_doc_id,
-                            bank_id,
-                        )
+            # Even with 0 facts, persist this batch's chunks (and run first-batch
+            # document tracking) so short / low-signal documents stay recallable.
+            # Previously this branch returned WITHOUT storing chunks, leaving the
+            # document row with zero chunks -> no embeddings -> the source was
+            # silently unrecallable. Mirror the has-facts write path (ensure row +
+            # lock -> track / ownership-check -> store chunks), minus fact inserts.
+            async with acquire_with_retry(pool) as conn:
+                async with conn.transaction():
+                    await conn.execute(
+                        f"INSERT INTO {fq_table('documents')} (id, bank_id, original_text, content_hash) "
+                        f"VALUES ($1, $2, '', '__pending__') "
+                        f"ON CONFLICT (id, bank_id) DO NOTHING",
+                        effective_doc_id,
+                        bank_id,
+                    )
+                    existing_hash = await conn.fetchval(
+                        f"SELECT content_hash FROM {fq_table('documents')} "
+                        f"WHERE id = $1 AND bank_id = $2 FOR UPDATE",
+                        effective_doc_id,
+                        bank_id,
+                    )
+                    if not doc_tracking_done[0]:
                         if is_recovery:
                             await fact_storage.upsert_document_metadata(
                                 conn,
@@ -1117,14 +1120,22 @@ async def _streaming_retain_batch(
                                 ops=pool.ops,
                             )
                         doc_tracking_done[0] = True
-                        # Memory: combined_content has been persisted; release
-                        # it now so the rest of the consumer loop doesn't pin
-                        # a multi-MB string. Nothing reads it after tracking.
                         combined_content = ""
-                        log_buffer.append(f"[streaming] Document {effective_doc_id} tracked (0 facts in first batch)")
+                    elif existing_hash is not None and existing_hash != new_content_hash:
+                        log_buffer.append(
+                            f"[streaming] Document {effective_doc_id} taken over by "
+                            f"concurrent request (hash mismatch) - aborting remaining batches"
+                        )
+                        pipeline_aborted[0] = True
+                        return
+                    if batch_chunk_meta:
+                        await chunk_storage.store_chunks_batch(
+                            conn, bank_id, effective_doc_id, batch_chunk_meta, ops=pool.ops
+                        )
             log_buffer.append(
                 f"[streaming] Consumer batch {consumer_batch_idx + 1}: "
-                f"0 facts extracted from {len(batch)} chunks, skipping"
+                f"0 facts extracted from {len(batch)} chunks, "
+                f"{len(batch_chunk_meta)} chunk(s) persisted"
             )
             return
 
