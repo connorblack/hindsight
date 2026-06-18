@@ -400,6 +400,8 @@ Different memory operations have different requirements. **Retain** (fact extrac
 | `HINDSIGHT_API_RETAIN_LLM_INITIAL_BACKOFF` | Initial backoff for retain retries (seconds) | Falls back to `HINDSIGHT_API_LLM_INITIAL_BACKOFF` |
 | `HINDSIGHT_API_RETAIN_LLM_MAX_BACKOFF` | Max backoff cap for retain retries (seconds) | Falls back to `HINDSIGHT_API_LLM_MAX_BACKOFF` |
 | `HINDSIGHT_API_RETAIN_LLM_TIMEOUT` | Timeout for retain requests (seconds) | Falls back to `HINDSIGHT_API_LLM_TIMEOUT` |
+| `HINDSIGHT_API_RETAIN_LLM_STRICT_SCHEMA` | Per-op override for `HINDSIGHT_API_LLM_STRICT_SCHEMA` on retain. Static. | Falls back to `HINDSIGHT_API_LLM_STRICT_SCHEMA` |
+| `HINDSIGHT_API_RETAIN_LLM_TEMPERATURE` | Sampling temperature for fact extraction. Static. | `0.1` |
 | `HINDSIGHT_API_REFLECT_LLM_PROVIDER` | LLM provider for reflect operations | Falls back to `HINDSIGHT_API_LLM_PROVIDER` |
 | `HINDSIGHT_API_REFLECT_LLM_API_KEY` | API key for reflect LLM | Falls back to `HINDSIGHT_API_LLM_API_KEY` |
 | `HINDSIGHT_API_REFLECT_LLM_MODEL` | Model for reflect operations | Falls back to `HINDSIGHT_API_LLM_MODEL` |
@@ -409,6 +411,7 @@ Different memory operations have different requirements. **Retain** (fact extrac
 | `HINDSIGHT_API_REFLECT_LLM_INITIAL_BACKOFF` | Initial backoff for reflect retries (seconds) | Falls back to `HINDSIGHT_API_LLM_INITIAL_BACKOFF` |
 | `HINDSIGHT_API_REFLECT_LLM_MAX_BACKOFF` | Max backoff cap for reflect retries (seconds) | Falls back to `HINDSIGHT_API_LLM_MAX_BACKOFF` |
 | `HINDSIGHT_API_REFLECT_LLM_TIMEOUT` | Timeout for reflect requests (seconds) | Falls back to `HINDSIGHT_API_LLM_TIMEOUT` |
+| `HINDSIGHT_API_REFLECT_LLM_STRICT_SCHEMA` | Per-op override for `HINDSIGHT_API_LLM_STRICT_SCHEMA` on reflect. Static. | Falls back to `HINDSIGHT_API_LLM_STRICT_SCHEMA` |
 | `HINDSIGHT_API_CONSOLIDATION_LLM_PROVIDER` | LLM provider for observation consolidation | Falls back to `HINDSIGHT_API_LLM_PROVIDER` |
 | `HINDSIGHT_API_CONSOLIDATION_LLM_API_KEY` | API key for consolidation LLM | Falls back to `HINDSIGHT_API_LLM_API_KEY` |
 | `HINDSIGHT_API_CONSOLIDATION_LLM_MODEL` | Model for consolidation operations | Falls back to `HINDSIGHT_API_LLM_MODEL` |
@@ -418,6 +421,7 @@ Different memory operations have different requirements. **Retain** (fact extrac
 | `HINDSIGHT_API_CONSOLIDATION_LLM_INITIAL_BACKOFF` | Initial backoff for consolidation retries (seconds) | Falls back to `HINDSIGHT_API_LLM_INITIAL_BACKOFF` |
 | `HINDSIGHT_API_CONSOLIDATION_LLM_MAX_BACKOFF` | Max backoff cap for consolidation retries (seconds) | Falls back to `HINDSIGHT_API_LLM_MAX_BACKOFF` |
 | `HINDSIGHT_API_CONSOLIDATION_LLM_TIMEOUT` | Timeout for consolidation requests (seconds) | Falls back to `HINDSIGHT_API_LLM_TIMEOUT` |
+| `HINDSIGHT_API_CONSOLIDATION_LLM_STRICT_SCHEMA` | Per-op override for `HINDSIGHT_API_LLM_STRICT_SCHEMA` on consolidation. Set `false` so a local reasoning model can think before emitting JSON (a strict grammar forces JSON from the first token, suppressing reasoning → empty consolidation output). Static. | Falls back to `HINDSIGHT_API_LLM_STRICT_SCHEMA` |
 
 :::tip When to Use Per-Operation Config
 - **Retain**: Use models with strong structured output (e.g., GPT-4o, Claude) for accurate fact extraction

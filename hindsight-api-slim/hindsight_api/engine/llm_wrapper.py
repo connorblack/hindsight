@@ -92,6 +92,26 @@ def _scope_to_operation(scope: str) -> str | None:
     return None
 
 
+def _strict_schema_for_scope(scope: str, config) -> bool:
+    """Resolve the effective strict_schema for a call scope.
+
+    Per-operation override (retain/reflect/consolidation) when set, else the
+    global HINDSIGHT_API_LLM_STRICT_SCHEMA flag. Lets retain stay strict
+    (grammar-enforced JSON) while consolidation/reflect run non-strict so a
+    local reasoning model can emit a <think> block before the JSON answer (a
+    strict grammar forces JSON from the first token, suppressing reasoning).
+    """
+    op = _scope_to_operation(scope)
+    override: bool | None = None
+    if op == "retain":
+        override = config.retain_llm_strict_schema
+    elif op == "reflect":
+        override = config.reflect_llm_strict_schema
+    elif op == "consolidation":
+        override = config.consolidation_llm_strict_schema
+    return config.llm_strict_schema if override is None else override
+
+
 def _semaphores_for_scope(scope: str) -> list[asyncio.Semaphore]:
     """Return the semaphores a call with the given scope must acquire.
 
@@ -842,7 +862,7 @@ class LLMProvider:
         # and providers without a strict mode simply ignore the flag.
         from ..config import get_config
 
-        strict_schema = strict_schema or get_config().llm_strict_schema
+        strict_schema = strict_schema or _strict_schema_for_scope(scope, get_config())
 
         # LLM call observability flows through the OTel GenAI recorder
         # (tracing.get_span_recorder().record_llm_call). Provider implementations

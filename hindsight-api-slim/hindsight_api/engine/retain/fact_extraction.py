@@ -1182,7 +1182,7 @@ def _build_request_body(llm_config, config, prompt: str, user_message: str, resp
     request_body = {
         "model": llm_config.model,
         "messages": [{"role": "system", "content": prompt}, {"role": "user", "content": user_message}],
-        "temperature": 0.1,
+        "temperature": config.retain_llm_temperature,
     }
 
     # Add max_completion_tokens if configured
@@ -1199,9 +1199,13 @@ def _build_request_body(llm_config, config, prompt: str, user_message: str, resp
     # output on capable backends rather than relying on the model to emit clean JSON.
     if hasattr(response_schema, "model_json_schema"):
         schema = response_schema.model_json_schema()
+        # Per-op retain override (None = inherit the global strict flag).
+        strict = (
+            config.retain_llm_strict_schema if config.retain_llm_strict_schema is not None else config.llm_strict_schema
+        )
         request_body["response_format"] = {
             "type": "json_schema",
-            "json_schema": {"name": "facts", "schema": schema, "strict": config.llm_strict_schema},
+            "json_schema": {"name": "facts", "schema": schema, "strict": strict},
         }
 
     return request_body
@@ -1293,7 +1297,7 @@ async def _extract_facts_from_chunk(
                 messages=[{"role": "system", "content": prompt}, {"role": "user", "content": user_message}],
                 response_format=response_schema,
                 scope="retain_extract_facts",
-                temperature=0.1,
+                temperature=config.retain_llm_temperature,
                 max_completion_tokens=config.retain_max_completion_tokens,
                 max_retries=llm_max_retries,
                 initial_backoff=initial_backoff,

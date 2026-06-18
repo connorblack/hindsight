@@ -190,6 +190,10 @@ ENV_RETAIN_LLM_INITIAL_BACKOFF = "HINDSIGHT_API_RETAIN_LLM_INITIAL_BACKOFF"
 ENV_RETAIN_LLM_MAX_BACKOFF = "HINDSIGHT_API_RETAIN_LLM_MAX_BACKOFF"
 ENV_RETAIN_LLM_TIMEOUT = "HINDSIGHT_API_RETAIN_LLM_TIMEOUT"
 ENV_RETAIN_LLM_LITELLMROUTER_CONFIG = "HINDSIGHT_API_RETAIN_LLM_LITELLMROUTER_CONFIG"
+# Per-op strict_schema override (None = inherit global HINDSIGHT_API_LLM_STRICT_SCHEMA).
+ENV_RETAIN_LLM_STRICT_SCHEMA = "HINDSIGHT_API_RETAIN_LLM_STRICT_SCHEMA"
+# Per-op fact-extraction sampling temperature (defaults to DEFAULT_RETAIN_LLM_TEMPERATURE).
+ENV_RETAIN_LLM_TEMPERATURE = "HINDSIGHT_API_RETAIN_LLM_TEMPERATURE"
 
 # Fireworks AI batch inference. Fireworks' batch API is a proprietary
 # account-scoped dataset/job REST API on a control-plane host, distinct from the
@@ -212,6 +216,8 @@ ENV_REFLECT_LLM_INITIAL_BACKOFF = "HINDSIGHT_API_REFLECT_LLM_INITIAL_BACKOFF"
 ENV_REFLECT_LLM_MAX_BACKOFF = "HINDSIGHT_API_REFLECT_LLM_MAX_BACKOFF"
 ENV_REFLECT_LLM_TIMEOUT = "HINDSIGHT_API_REFLECT_LLM_TIMEOUT"
 ENV_REFLECT_LLM_LITELLMROUTER_CONFIG = "HINDSIGHT_API_REFLECT_LLM_LITELLMROUTER_CONFIG"
+# Per-op strict_schema override (None = inherit global HINDSIGHT_API_LLM_STRICT_SCHEMA).
+ENV_REFLECT_LLM_STRICT_SCHEMA = "HINDSIGHT_API_REFLECT_LLM_STRICT_SCHEMA"
 
 ENV_CONSOLIDATION_LLM_PROVIDER = "HINDSIGHT_API_CONSOLIDATION_LLM_PROVIDER"
 ENV_CONSOLIDATION_LLM_API_KEY = "HINDSIGHT_API_CONSOLIDATION_LLM_API_KEY"
@@ -223,6 +229,10 @@ ENV_CONSOLIDATION_LLM_INITIAL_BACKOFF = "HINDSIGHT_API_CONSOLIDATION_LLM_INITIAL
 ENV_CONSOLIDATION_LLM_MAX_BACKOFF = "HINDSIGHT_API_CONSOLIDATION_LLM_MAX_BACKOFF"
 ENV_CONSOLIDATION_LLM_TIMEOUT = "HINDSIGHT_API_CONSOLIDATION_LLM_TIMEOUT"
 ENV_CONSOLIDATION_LLM_LITELLMROUTER_CONFIG = "HINDSIGHT_API_CONSOLIDATION_LLM_LITELLMROUTER_CONFIG"
+# Per-op strict_schema override (None = inherit global HINDSIGHT_API_LLM_STRICT_SCHEMA).
+# Set to false so a local reasoning consolidation model can think before emitting JSON
+# (a strict grammar forces JSON from token 0, suppressing reasoning).
+ENV_CONSOLIDATION_LLM_STRICT_SCHEMA = "HINDSIGHT_API_CONSOLIDATION_LLM_STRICT_SCHEMA"
 
 ENV_EMBEDDINGS_PROVIDER = "HINDSIGHT_API_EMBEDDINGS_PROVIDER"
 ENV_EMBEDDINGS_LOCAL_MODEL = "HINDSIGHT_API_EMBEDDINGS_LOCAL_MODEL"
@@ -848,6 +858,7 @@ DEFAULT_BANK_STATS_CACHE_MAX_ENTRIES = 1024  # LRU bound across (schema, bank) k
 
 # Retain settings
 DEFAULT_RETAIN_MAX_COMPLETION_TOKENS = 64000  # Max tokens for fact extraction LLM call
+DEFAULT_RETAIN_LLM_TEMPERATURE = 0.1  # Sampling temperature for fact extraction (overridable per-op)
 DEFAULT_RETAIN_CHUNK_SIZE = 3000  # Max chars per chunk for fact extraction
 DEFAULT_RETAIN_EXTRACT_CAUSAL_LINKS = True  # Extract causal links between facts
 DEFAULT_RETAIN_EXTRACTION_MODE = "concise"  # Extraction mode: "concise", "verbose", or "custom"
@@ -1245,6 +1256,16 @@ def _get_default_model_for_provider(provider: str) -> str:
     return PROVIDER_DEFAULT_MODELS.get(provider.lower(), DEFAULT_LLM_MODEL)
 
 
+def _optional_bool_env(name: str) -> bool | None:
+    """Parse an optional boolean env var: None when unset, else 'true'/'1' -> True.
+
+    Used by per-operation strict_schema overrides that fall back to the global
+    HINDSIGHT_API_LLM_STRICT_SCHEMA flag when their own env var is unset.
+    """
+    raw = os.getenv(name)
+    return None if raw is None else raw.lower() in ("true", "1")
+
+
 def _parse_llm_router_config(env_var: str) -> dict | None:
     """
     Parse a LiteLLM Router configuration from a JSON env var.
@@ -1377,6 +1398,10 @@ class HindsightConfig:
     retain_llm_max_backoff: float | None
     retain_llm_timeout: float | None
     retain_llm_litellmrouter_config: dict | None
+    # Per-op strict_schema override (None = inherit llm_strict_schema). Static.
+    retain_llm_strict_schema: bool | None
+    # Per-op fact-extraction sampling temperature. Static.
+    retain_llm_temperature: float
 
     # Fireworks AI batch inference (static, server-level)
     fireworks_account_id: str | None
@@ -1393,6 +1418,8 @@ class HindsightConfig:
     reflect_llm_max_backoff: float | None
     reflect_llm_timeout: float | None
     reflect_llm_litellmrouter_config: dict | None
+    # Per-op strict_schema override (None = inherit llm_strict_schema). Static.
+    reflect_llm_strict_schema: bool | None
 
     consolidation_llm_provider: str | None
     consolidation_llm_api_key: str | None
@@ -1404,6 +1431,8 @@ class HindsightConfig:
     consolidation_llm_max_backoff: float | None
     consolidation_llm_timeout: float | None
     consolidation_llm_litellmrouter_config: dict | None
+    # Per-op strict_schema override (None = inherit llm_strict_schema). Static.
+    consolidation_llm_strict_schema: bool | None
 
     # Embeddings
     embeddings_provider: str
@@ -2077,6 +2106,8 @@ class HindsightConfig:
                 else None
             ),
             retain_llm_base_url=os.getenv(ENV_RETAIN_LLM_BASE_URL) or None,
+            retain_llm_strict_schema=_optional_bool_env(ENV_RETAIN_LLM_STRICT_SCHEMA),
+            retain_llm_temperature=float(os.getenv(ENV_RETAIN_LLM_TEMPERATURE, str(DEFAULT_RETAIN_LLM_TEMPERATURE))),
             fireworks_account_id=os.getenv(ENV_FIREWORKS_ACCOUNT_ID) or None,
             fireworks_batch_base_url=os.getenv(ENV_FIREWORKS_BATCH_BASE_URL) or DEFAULT_FIREWORKS_BATCH_BASE_URL,
             fireworks_batch_max_wait_seconds=int(
@@ -2105,6 +2136,7 @@ class HindsightConfig:
                 else None
             ),
             reflect_llm_base_url=os.getenv(ENV_REFLECT_LLM_BASE_URL) or None,
+            reflect_llm_strict_schema=_optional_bool_env(ENV_REFLECT_LLM_STRICT_SCHEMA),
             reflect_llm_max_concurrent=int(os.getenv(ENV_REFLECT_LLM_MAX_CONCURRENT))
             if os.getenv(ENV_REFLECT_LLM_MAX_CONCURRENT)
             else None,
@@ -2130,6 +2162,7 @@ class HindsightConfig:
                 else None
             ),
             consolidation_llm_base_url=os.getenv(ENV_CONSOLIDATION_LLM_BASE_URL) or None,
+            consolidation_llm_strict_schema=_optional_bool_env(ENV_CONSOLIDATION_LLM_STRICT_SCHEMA),
             consolidation_llm_max_concurrent=int(os.getenv(ENV_CONSOLIDATION_LLM_MAX_CONCURRENT))
             if os.getenv(ENV_CONSOLIDATION_LLM_MAX_CONCURRENT)
             else None,
