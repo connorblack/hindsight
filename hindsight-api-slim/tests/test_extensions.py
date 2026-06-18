@@ -101,25 +101,19 @@ class RateLimitingValidator(OperationValidatorExtension):
     async def validate_retain(self, ctx: RetainContext) -> ValidationResult:
         self.retain_counts[ctx.bank_id] += 1
         if self.retain_counts[ctx.bank_id] > self.max_attempts:
-            return ValidationResult.reject(
-                f"Retain limit exceeded for bank {ctx.bank_id}"
-            )
+            return ValidationResult.reject(f"Retain limit exceeded for bank {ctx.bank_id}")
         return ValidationResult.accept()
 
     async def validate_recall(self, ctx: RecallContext) -> ValidationResult:
         self.recall_counts[ctx.bank_id] += 1
         if self.recall_counts[ctx.bank_id] > self.max_attempts:
-            return ValidationResult.reject(
-                f"Recall limit exceeded for bank {ctx.bank_id}"
-            )
+            return ValidationResult.reject(f"Recall limit exceeded for bank {ctx.bank_id}")
         return ValidationResult.accept()
 
     async def validate_reflect(self, ctx: ReflectContext) -> ValidationResult:
         self.reflect_counts[ctx.bank_id] += 1
         if self.reflect_counts[ctx.bank_id] > self.max_attempts:
-            return ValidationResult.reject(
-                f"Reflect limit exceeded for bank {ctx.bank_id}"
-            )
+            return ValidationResult.reject(f"Reflect limit exceeded for bank {ctx.bank_id}")
         return ValidationResult.accept()
 
 
@@ -579,9 +573,7 @@ class TestMemoryEngineTenantAuth:
     """Tests for tenant authentication in MemoryEngine."""
 
     @pytest.mark.asyncio
-    async def test_retain_requires_tenant_request_when_extension_configured(
-        self, memory_with_tenant
-    ):
+    async def test_retain_requires_tenant_request_when_extension_configured(self, memory_with_tenant):
         """Retain fails without RequestContext when tenant extension is configured."""
         memory = memory_with_tenant
 
@@ -621,9 +613,7 @@ class TestMemoryEngineTenantAuth:
         assert "Invalid API key" in str(exc_info.value)
 
     @pytest.mark.asyncio
-    async def test_recall_requires_tenant_request_when_extension_configured(
-        self, memory_with_tenant
-    ):
+    async def test_recall_requires_tenant_request_when_extension_configured(self, memory_with_tenant):
         """Recall fails without RequestContext when tenant extension is configured."""
         memory = memory_with_tenant
 
@@ -861,8 +851,7 @@ class RecordingPrecheckValidator(OperationValidatorExtension):
     instantiable; the tests here only exercise precheck.
     """
 
-    def __init__(self, *, reject: bool = False, status_code: int = 402,
-                 reason: str = "rejected by precheck") -> None:
+    def __init__(self, *, reject: bool = False, status_code: int = 402, reason: str = "rejected by precheck") -> None:
         super().__init__(config={})
         self.reject = reject
         self.status_code = status_code
@@ -922,7 +911,7 @@ class TestPrecheckHttpWiring:
     def _build_app(validator):
         """Mirror the precheck wiring from ``hindsight_api.api.http`` in a
         standalone FastAPI app."""
-        from fastapi import Depends, FastAPI, HTTPException
+        from fastapi import Depends, FastAPI, HTTPException, Request
         from pydantic import BaseModel, model_validator
 
         from hindsight_api.extensions import PrecheckContext
@@ -963,12 +952,23 @@ class TestPrecheckHttpWiring:
         def _precheck_for(operation: str):
             async def _dep(
                 bank_id: str,
+                request: Request,
                 request_context: RequestContext = Depends(_request_context),
             ) -> None:
+                cl_header = request.headers.get("content-length")
+                content_length: int | None = None
+                if cl_header is not None:
+                    try:
+                        parsed = int(cl_header)
+                    except ValueError:
+                        parsed = -1
+                    if parsed >= 0:
+                        content_length = parsed
                 ctx = PrecheckContext(
                     operation=operation,
                     bank_id=bank_id,
                     request_context=request_context,
+                    content_length=content_length,
                 )
                 result = await validator.precheck(ctx)
                 if not result.allowed:
@@ -1027,9 +1027,7 @@ class TestPrecheckHttpWiring:
         assert body_parses == ["retain"]
 
     def test_precheck_rejection_returns_status_and_reason(self):
-        validator = RecordingPrecheckValidator(
-            reject=True, status_code=402, reason="Insufficient credits"
-        )
+        validator = RecordingPrecheckValidator(reject=True, status_code=402, reason="Insufficient credits")
         app, _ = self._build_app(validator)
         client = TestClient(app)
 
@@ -1045,9 +1043,7 @@ class TestPrecheckHttpWiring:
         deserialises the body. We send an oversized body and verify the
         body-parse counter never incremented.
         """
-        validator = RecordingPrecheckValidator(
-            reject=True, status_code=402, reason="rejected by precheck"
-        )
+        validator = RecordingPrecheckValidator(reject=True, status_code=402, reason="rejected by precheck")
         app, body_parses = self._build_app(validator)
         client = TestClient(app)
 
@@ -1063,9 +1059,7 @@ class TestPrecheckHttpWiring:
         )
 
     def test_precheck_rejection_skips_body_parse_for_recall(self):
-        validator = RecordingPrecheckValidator(
-            reject=True, status_code=402, reason="rejected"
-        )
+        validator = RecordingPrecheckValidator(reject=True, status_code=402, reason="rejected")
         app, body_parses = self._build_app(validator)
         client = TestClient(app)
 
@@ -1078,9 +1072,7 @@ class TestPrecheckHttpWiring:
         assert body_parses == []
 
     def test_precheck_rejection_skips_body_parse_for_reflect(self):
-        validator = RecordingPrecheckValidator(
-            reject=True, status_code=402, reason="rejected"
-        )
+        validator = RecordingPrecheckValidator(reject=True, status_code=402, reason="rejected")
         app, body_parses = self._build_app(validator)
         client = TestClient(app)
 
@@ -1100,3 +1092,86 @@ class TestPrecheckHttpWiring:
         resp = client.get("/v1/default/banks/precheck-bank/memories/list")
         assert resp.status_code == 200
         assert len(validator.precheck_calls) == 0
+
+    def test_precheck_context_carries_content_length(self):
+        """Content-Length header is exposed to the precheck so a validator
+        can make size-aware decisions (e.g. upper-bound cost estimate)
+        before the body is deserialised."""
+        validator = RecordingPrecheckValidator(reject=False)
+        app, _ = self._build_app(validator)
+        client = TestClient(app)
+
+        # Body must contain at least 500 'x' bytes; check the surfaced
+        # Content-Length is within a tight band around that floor (allows
+        # for JSON envelope + httpx's serialisation choices without
+        # depending on exact byte counts).
+        payload = {"items": [{"content": "x" * 500}]}
+        resp = client.post(
+            "/v1/default/banks/precheck-bank/memories",
+            json=payload,
+        )
+        assert resp.status_code == 200
+        assert len(validator.precheck_calls) == 1
+        ctx = validator.precheck_calls[0]
+        assert ctx.content_length is not None
+        assert 500 <= ctx.content_length <= 600
+
+    def test_precheck_context_content_length_zero_is_not_none(self):
+        """An empty POST body has Content-Length: 0. That should surface
+        as the int 0, not None — None means 'unknown', 0 means 'known to
+        be empty'."""
+        validator = RecordingPrecheckValidator(reject=False)
+        app, _ = self._build_app(validator)
+        client = TestClient(app)
+
+        # Empty body fails Pydantic parse (422), but precheck runs first
+        # and records the Content-Length.
+        client.post(
+            "/v1/default/banks/precheck-bank/memories",
+            content=b"",
+            headers={"content-type": "application/json"},
+        )
+        assert len(validator.precheck_calls) >= 1
+        ctx = validator.precheck_calls[-1]
+        assert ctx.content_length == 0
+
+    @pytest.mark.asyncio
+    async def test_precheck_context_content_length_none_when_header_missing(self):
+        """When the Content-Length header isn't set (e.g. chunked transfer
+        encoding) the validator sees None, not a crash and not a default 0."""
+        from starlette.requests import Request as _StarletteRequest
+
+        from hindsight_api.extensions import PrecheckContext
+        from hindsight_api.models import RequestContext
+
+        validator = RecordingPrecheckValidator(reject=False)
+
+        # Replicate the wiring's parse step inline so the test exercises
+        # the same code-path semantics introduced in
+        # ``hindsight_api.api.http._precheck_dep``.
+        scope = {
+            "type": "http",
+            "method": "POST",
+            "path": "/v1/default/banks/bank-x/memories",
+            "headers": [],  # no content-length
+            "query_string": b"",
+        }
+        req = _StarletteRequest(scope)
+        cl_header = req.headers.get("content-length")
+        content_length: int | None = None
+        if cl_header is not None:
+            try:
+                parsed = int(cl_header)
+            except ValueError:
+                parsed = -1
+            if parsed >= 0:
+                content_length = parsed
+
+        ctx = PrecheckContext(
+            operation="retain",
+            bank_id="bank-x",
+            request_context=RequestContext(),
+            content_length=content_length,
+        )
+        await validator.precheck(ctx)
+        assert validator.precheck_calls[-1].content_length is None

@@ -2,7 +2,7 @@
 import { existsSync, realpathSync } from "fs";
 import { dirname, join, resolve } from "path";
 import { createRequire } from "module";
-import { fileURLToPath, pathToFileURL } from "url";
+import { fileURLToPath } from "url";
 import { HindsightServer } from "@vectorize-io/hindsight-all";
 import { HindsightClient } from "@vectorize-io/hindsight-client";
 
@@ -17,7 +17,7 @@ function loadPackageVersion(): string {
 }
 
 const USER_AGENT = `hindsight-openclaw/${loadPackageVersion()}`;
-import { detectExternalApi, detectLLMConfig } from "./index.js";
+import { DEFAULT_RETAIN_CONTEXT, detectExternalApi, detectLLMConfig } from "./index.js";
 import type { BankStats, PluginConfig } from "./types.js";
 import {
   buildBackfillPlan,
@@ -547,6 +547,7 @@ export async function runCli(argv: string[] = process.argv.slice(2)): Promise<vo
         }
         await client.retain(entry.bankId, entry.transcript, {
           documentId: entry.documentId,
+          context: pluginConfig.retainContext || DEFAULT_RETAIN_CONTEXT,
           metadata,
           async: true,
         });
