@@ -425,18 +425,30 @@ class PostgreSQLOps(DataAccessOps):
         # Scope by joining through entities.bank_id (entity_cooccurrences itself
         # has no bank_id column — entities don't span banks, so scoping via
         # entity_id_1 is sufficient).
+        #
+        # The cooccurrence PK is canonical (entity_id_1 < entity_id_2). The previous form ran a
+        # *correlated* double self-join of unit_entities for EACH cooccurrence row — a Nested Loop
+        # Anti Join over the whole table — which on a large/over-stamped bank blew past
+        # statement_timeout and failed graph maintenance 100%. De-correlate it: materialize the
+        # bank's currently-valid canonical pairs ONCE (single merge-join self-join, ~seconds), then
+        # anti-join the cooccurrence table against that set. The `u1.entity_id < u2.entity_id` join
+        # predicate matches the stored canonical ordering (and halves the self-join).
         result = await conn.execute(
             f"""
+            WITH valid AS MATERIALIZED (
+                SELECT DISTINCT u1.entity_id AS e1, u2.entity_id AS e2
+                FROM {ue_table} u1
+                JOIN {ue_table} u2
+                  ON u1.unit_id = u2.unit_id AND u1.entity_id < u2.entity_id
+                JOIN {entities_table} e ON e.id = u1.entity_id AND e.bank_id = $1
+            )
             DELETE FROM {ec_table} c
             USING {entities_table} e
             WHERE e.id = c.entity_id_1
               AND e.bank_id = $1
               AND NOT EXISTS (
-                  SELECT 1
-                  FROM {ue_table} u1
-                  JOIN {ue_table} u2 ON u1.unit_id = u2.unit_id
-                  WHERE u1.entity_id = c.entity_id_1
-                    AND u2.entity_id = c.entity_id_2
+                  SELECT 1 FROM valid v
+                  WHERE v.e1 = c.entity_id_1 AND v.e2 = c.entity_id_2
               )
             """,
             bank_id,
