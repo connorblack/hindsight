@@ -1835,10 +1835,18 @@ async def _append_observation_history(
     history from growing without bound.
     """
     obs_uuid = uuid.UUID(observation_id)
+    # Guard the FK race: a concurrent consolidation worker can delete/merge this
+    # observation between the UPDATE above and this insert. observation_history's
+    # observation_id FK (-> memory_units ON DELETE CASCADE) would then raise and
+    # abort the whole consolidation transaction (acute at high worker concurrency).
+    # Insert only if the observation still exists — there is nothing to snapshot for
+    # a row that has vanished. The UPDATE above locks the row when it matched, so
+    # this closes the window rather than merely narrowing it.
     await conn.execute(
         f"""
         INSERT INTO {fq_table("observation_history")} (observation_id, bank_id, content, changed_at)
-        VALUES ($1, $2, $3::jsonb, now())
+        SELECT $1, $2, $3::jsonb, now()
+        WHERE EXISTS (SELECT 1 FROM {fq_table("memory_units")} WHERE id = $1)
         """,
         obs_uuid,
         bank_id,
