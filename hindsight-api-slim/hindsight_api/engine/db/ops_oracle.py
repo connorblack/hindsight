@@ -329,6 +329,9 @@ class OracleOps(DataAccessOps):
         entities_table: str,
         bank_id: str,
     ) -> int:
+        # Cooccurrence PK is canonical (entity_id_1 < entity_id_2); the valid-pair subquery uses the
+        # same ordering (halves it) and is bank-scoped. Already de-correlated (NOT IN over a derived
+        # set computed once), unlike the old correlated PG form that timed graph maintenance out.
         deleted = await conn.execute(
             f"""
             DELETE FROM {ec_table}
@@ -336,7 +339,8 @@ class OracleOps(DataAccessOps):
               AND (entity_id_1, entity_id_2) NOT IN (
                   SELECT u1.entity_id, u2.entity_id
                   FROM {ue_table} u1
-                  JOIN {ue_table} u2 ON u1.unit_id = u2.unit_id
+                  JOIN {ue_table} u2 ON u1.unit_id = u2.unit_id AND u1.entity_id < u2.entity_id
+                  JOIN {entities_table} e ON e.id = u1.entity_id AND e.bank_id = $1
               )
             """,
             bank_id,
