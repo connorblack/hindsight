@@ -19,7 +19,7 @@ _MISSION_PRIORITY_NOTE = (
 
 _PROCESSING_RULES = """## PROCESSING RULES
 
-1. PREFER UPDATE OVER CREATE (when there is something to merge with): if new facts describe the same canonical event, statement, decision, claim, or recurring pattern already covered by an existing observation, UPDATE that observation and attach the new facts as evidence. Do NOT create a near-duplicate sibling. One canonical observation with many source facts is always better than many siblings with one source fact each. Merge aggressively on: same named event, same diagnostic finding, same architectural decision, same recurring claim. **When the EXISTING OBSERVATIONS list is empty, or no existing observation covers the same facet as a new fact, CREATE a new observation** — this rule is about preventing duplicates, not about refusing to record durable knowledge. CREATE is the correct default for any structurally distinct event, claim, or pattern that has no existing match.
+1. CREATE BY DEFAULT; UPDATE ONLY IF ALL GATES PASS: do NOT update an existing observation unless EVERY gate below passes. (a) TARGET — the existing observation and the new fact are about the same specific entity AND the same specific facet/event/decision/claim/recurring-pattern, not merely the same person, place, or topic. (b) TYPE — like updates like: an event updates that same event, a state/facet updates that same state/facet, a recurring pattern updates that same pattern; never turn one event or facet into a different one. (c) OCCURRENCE — for a specific event, it must be the SAME occasion; a different day or a different occurrence is a DISTINCT event → CREATE. (d) PRESERVATION — the updated text must still be about the existing observation's original target; if incorporating the fact would change its subject, you have the wrong target → CREATE. If any gate fails, or you are unsure, CREATE. You MUST NOT update when the only thing shared is a person, place, date, broad topic, project, or relationship — that is not a match. Related-but-distinct facts stay separate; the downstream dedup pass safely merges any accidental duplicates. When the EXISTING OBSERVATIONS list is empty, always CREATE.
 
 2. ONE OBSERVATION PER DISTINCT FACET: each observation tracks exactly one specific facet — a count ("has 3 items"), a named entity ("has a dog named Rex"), a relationship ("works at Google"), a decision, an event. Never merge different facets into one observation.
 
@@ -35,7 +35,11 @@ _PROCESSING_RULES = """## PROCESSING RULES
 
 8. NO COMPUTATION: you do not have the full picture — never calculate, derive, or adjust numeric values. If the user says "I have 2 dogs" and then "I have a dog named Rex", do NOT update the count to 3 — you don't know if Rex is one of the 2 or a new one. If the user says "I sold X", do NOT decrement a count. Only update a count when the user explicitly states a new count. Synthesize and consolidate what was stated, but never do arithmetic or logical deductions.
 
-9. KEEP DISTINCT TOPICS DISTINCT: do not merge observations about different people, entities, or unrelated topics. Merging is for the same canonical fact recurring — not for related-but-distinct claims."""
+9. KEEP DISTINCT TOPICS DISTINCT: do not merge observations about different people, entities, or unrelated topics. Merging is for the same canonical fact recurring — not for related-but-distinct claims.
+
+10. SAME OCCURRENCE — NOT JUST SAME DAY OR TOPIC: for a specific event or occurrence (a meeting, call, purchase, trip, meal, shipment), UPDATE only an observation about the SAME occurrence — normally the same date/occasion. A fact about a different day, or a different occurrence, is a DISTINCT event → CREATE, even if it shares a person, place, or general topic. Two things on the same day are usually different events unless they are the identical occurrence. (Genuinely recurring patterns and ongoing decisions are exempt — those legitimately span dates.)
+
+11. AN UPDATE MUST PRESERVE ITS TARGET: an UPDATE must keep what the existing observation is about and refine or extend it with the new fact; the updated text must still describe the SAME thing that observation described. If incorporating the new fact would change the observation's subject or event into something different, you have the wrong target — CREATE instead."""
 
 # Stable description of the input shape. For the cached split path this lives in
 # the system prefix (build_consolidation_system_prompt) so it is not re-sent on
@@ -124,6 +128,38 @@ Expected output (UPDATE for the state change; CREATE for the unrelated work-hour
   "updates": [{{"text": "Alice owned a 2019 Honda Civic; sold it on March 15, 2025.", "observation_id": "22222222-2222-2222-2222-222222222222", "source_fact_ids": ["c3d4e5f6-a7b8-9012-cdef-123456789012"], "reason": "State change to the existing Honda Civic observation 2222 — UPDATE, not a new sibling."}}],
   "deletes": []}}
 
+### Example 3 — No genuine match → CREATE (do NOT overwrite a loosely-related observation)
+
+Input fact:
+  [e5f6a7b8-c9d0-1234-ef01-23456789abcd] Ken received a FedEx package from Dubow's office on June 18, 1990.
+
+Existing observation:
+  {{"id": "33333333-3333-3333-3333-333333333333", "text": "Ken had a phone call with Chris about the contract on June 18, 1990.", "proof_count": 2}}
+
+WRONG — destructive over-merge: UPDATE 3333… with the FedEx text. That overwrites an unrelated phone-call observation; same day + same person is NOT the same event.
+
+Expected output (CREATE — the shipment is a distinct event with no matching observation):
+
+{{"creates": [{{"text": "Ken received a FedEx package from Dubow's office on June 18, 1990.", "source_fact_ids": ["e5f6a7b8-c9d0-1234-ef01-23456789abcd"], "reason": "Distinct shipment event; the only same-day observation is an unrelated phone call, so no match — CREATE."}}],
+  "updates": [],
+  "deletes": []}}
+
+### Example 4 — Same person/place, different occurrence → CREATE (a near miss)
+
+Input fact:
+  [a1a1a1a1-b2b2-c3c3-d4d4-e5e5e5e5e5e5] Ken picked up allergy medication from Dr. Patel's office on May 9, 1991.
+
+Existing observation:
+  {{"id": "44444444-4444-4444-4444-444444444444", "text": "Ken saw Dr. Patel for a knee examination on May 2, 1991.", "proof_count": 2}}
+
+WRONG — destructive over-merge: UPDATE 4444… with the medication-pickup fact. Same doctor/office is NOT the same event, and the dates differ.
+
+Expected output (CREATE — a distinct errand at the same office):
+
+{{"creates": [{{"text": "Ken picked up allergy medication from Dr. Patel's office on May 9, 1991.", "source_fact_ids": ["a1a1a1a1-b2b2-c3c3-d4d4-e5e5e5e5e5e5"], "reason": "CREATE because obs 4444 is about a May 2 knee exam while the new fact is a May 9 medication pickup; shared doctor/office is not the same event."}}],
+  "updates": [],
+  "deletes": []}}
+
 ### Observation text rules
 
 - Write clean prose — NEVER copy raw fact lines or their metadata (temporal fields, "Involving:", "When:" labels, UUIDs).
@@ -137,7 +173,7 @@ Expected output (UPDATE for the state change; CREATE for the unrelated work-hour
 - One create or update may reference multiple facts when they jointly support the observation.
 - **AT MOST ONE UPDATE PER `observation_id`**: if several new facts all update the same existing observation, emit a single `updates` entry that lists all contributing `source_fact_ids` and a single consolidated `text`. Never emit two `updates` entries with the same `observation_id` in one response — they would silently overwrite each other.
 - `deletes`: only when an observation is directly superseded or contradicted by new facts.
-- `reason`: REQUIRED on every create/update/delete — one sentence explaining the choice. For a CREATE, state which existing observation(s) you considered and why none matched (a near-identical existing observation means you should UPDATE, not CREATE). This is audited to catch duplicate creates.
+- `reason`: REQUIRED on every create/update/delete — one sentence explaining the choice. For a CREATE, state which existing observation(s) you considered and why none matched (a near-identical existing observation means you should UPDATE, not CREATE). This is audited to catch duplicate creates. For an UPDATE, the reason MUST name three things: (1) the existing observation's target, (2) the new fact's target, and (3) the specific shared identity — the exact same event/facet/state/pattern — plus why this is not merely a shared person, topic, place, or date. If you cannot name the same specific target for BOTH, CREATE instead.
 - Do NOT include `tags` — handled automatically.
 - Return `{{"creates": [], "updates": [], "deletes": []}}` if nothing durable is found."""
 
@@ -163,8 +199,20 @@ def build_batch_consolidation_prompt(
         capacity_section = f"\n\n## CAPACITY CONSTRAINT\n\n{escape_for_prompt(observation_capacity_note)}"
 
     return (
-        "You are a memory consolidation system. Synthesize new facts into "
-        "observations, merging with existing observations when appropriate.\n\n"
+        "You are a memory consolidation linker. Your job is high-precision "
+        "identity matching of new facts to existing observations — NOT "
+        "summarization, and NOT deduplication.\n\n"
+        "PRIMARY OBJECTIVE — PROTECT EXISTING OBSERVATIONS. CREATE is the safe "
+        "default action. UPDATE is exceptional and is allowed ONLY after passing "
+        "every gate in rule 1. A duplicate CREATE is acceptable and fully "
+        "recoverable — a downstream deduplication pass merges accidental "
+        "duplicates. A wrong-target UPDATE permanently overwrites and corrupts "
+        "an unrelated observation and is NOT recoverable. When in doubt, CREATE.\n\n"
+        "The EXISTING OBSERVATIONS are noisy recall candidates pooled from "
+        "similarity search; many are distractors that merely share a person, "
+        "place, date, or topic with a new fact. Their presence is NOT evidence "
+        "that an update is appropriate — it is normal, and often correct, to "
+        "update NONE of them.\n\n"
         f"## MISSION\n\n{mission}\n\n"
         f"{_MISSION_PRIORITY_NOTE}"
         f"{capacity_section}\n\n"
@@ -191,8 +239,20 @@ def build_consolidation_system_prompt(
     and cached prefix.
     """
     template = (
-        "You are a memory consolidation system. Synthesize new facts into "
-        "observations, merging with existing observations when appropriate.\n\n"
+        "You are a memory consolidation linker. Your job is high-precision "
+        "identity matching of new facts to existing observations — NOT "
+        "summarization, and NOT deduplication.\n\n"
+        "PRIMARY OBJECTIVE — PROTECT EXISTING OBSERVATIONS. CREATE is the safe "
+        "default action. UPDATE is exceptional and is allowed ONLY after passing "
+        "every gate in rule 1. A duplicate CREATE is acceptable and fully "
+        "recoverable — a downstream deduplication pass merges accidental "
+        "duplicates. A wrong-target UPDATE permanently overwrites and corrupts "
+        "an unrelated observation and is NOT recoverable. When in doubt, CREATE.\n\n"
+        "The EXISTING OBSERVATIONS are noisy recall candidates pooled from "
+        "similarity search; many are distractors that merely share a person, "
+        "place, date, or topic with a new fact. Their presence is NOT evidence "
+        "that an update is appropriate — it is normal, and often correct, to "
+        "update NONE of them.\n\n"
         f"{_MISSION_PRIORITY_NOTE}\n\n"
         f"{_PROCESSING_RULES}\n\n"
         f"{_INPUT_FORMAT_NOTE}\n\n"
