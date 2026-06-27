@@ -632,18 +632,20 @@ def _effective_scope_limit(config: Any, fact_tags: list[str]) -> int:
 
 
 def _build_response_model(max_creates: int | None = None) -> type[_ConsolidationBatchResponse]:
-    """Build a response model, optionally constraining max creates via JSON schema."""
-    if max_creates is None or max_creates < 0:
-        return _ConsolidationBatchResponse
+    """Return the consolidation response model.
 
-    from pydantic import Field as PydanticField
-
-    clamped = max(max_creates, 0)
-
-    class _ConstrainedConsolidationBatchResponse(_ConsolidationBatchResponse):
-        creates: list[_CreateAction] = PydanticField(default=[], max_length=clamped)
-
-    return _ConstrainedConsolidationBatchResponse
+    ``max_creates`` (the per-scope remaining-slot budget) is intentionally NOT enforced
+    as a Pydantic / JSON-schema ``max_length`` on ``creates``. Models served without
+    strict grammar (the ``json_object`` path) routinely emit a few more creates than the
+    budget; a hard ``max_length`` makes Pydantic reject the ENTIRE batch (``too_long``)
+    so the whole consolidation fails after its retry budget — observed as a steady
+    trickle of ``consolidation_failed_at`` facts. The cap is instead enforced robustly by
+    the caller, which truncates ``creates`` to ``remaining_observation_slots`` after
+    parsing (the defensive truncation in ``_process_one_llm_batch``); the prompt already
+    tells the model its remaining slot budget. The parameter is retained for call-site
+    clarity and possible future strict-grammar use.
+    """
+    return _ConsolidationBatchResponse
 
 
 class ConsolidationPerfLog:
@@ -1218,13 +1220,28 @@ async def _run_consolidation_job(
 
         if llm_parallelism > 1 and len(numbered_groups) > 1:
             sem = asyncio.Semaphore(llm_parallelism)
-            # Per-scope async locks shared across all parallel groups in this
-            # fetch iteration. Each group acquires locks for every scope it will
-            # write to, in _scope_sort_key order (deadlock-free). Groups with
-            # disjoint scope sets never contend; any overlap serialises on the
-            # overlapping scopes — covering combined / per_tag / all_combinations
-            # / explicit-list modes uniformly without operator opt-in.
-            scope_locks: defaultdict[frozenset[str], asyncio.Lock] = defaultdict(asyncio.Lock)
+            # Per-scope concurrency gate (was an asyncio.Lock == Semaphore(1)). Each group
+            # acquires a gate for every write-scope it touches, in _scope_sort_key order
+            # (deadlock-free; a consistent global acquisition order eliminates circular
+            # wait for counting semaphores exactly as for binary locks). Groups with
+            # disjoint scope sets never contend.
+            #   K=1 (default): any scope overlap serialises -> the original serial
+            #     merge-as-you-go (each fact sees prior facts' obs and UPDATE-merges).
+            #   K>1 (consolidation_scope_concurrency, bulk parallel runs): up to K groups
+            #     per scope run concurrently. This is a deliberate speed-vs-strict-merge
+            #     tradeoff: concurrent same-scope groups can race (duplicate creates,
+            #     last-writer-wins on a shared obs's text AND its source_fact_ids/proof_count
+            #     (a concurrent group's update can drop another's just-added source ids),
+            #     transient cap overshoot). The
+            #     dedup pass best-effort reconciles near-duplicate creates (Postgres only;
+            #     >= consolidation_dedup_threshold), and future consolidation rounds
+            #     re-merge the rest. Use K=1 where strict merge fidelity matters.
+            # NOTE: this gate only exists in the llm_parallelism>1 branch, so
+            # consolidation_scope_concurrency has no effect unless llm_parallelism > 1.
+            _scope_k = max(1, config.consolidation_scope_concurrency)
+            scope_locks: defaultdict[frozenset[str], asyncio.Semaphore] = defaultdict(
+                lambda: asyncio.Semaphore(_scope_k)
+            )
 
             async def _run_group(
                 group_batches: list[tuple[list[dict[str, Any]], int]],

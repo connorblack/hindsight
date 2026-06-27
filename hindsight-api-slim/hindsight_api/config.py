@@ -233,6 +233,7 @@ ENV_CONSOLIDATION_LLM_INITIAL_BACKOFF = "HINDSIGHT_API_CONSOLIDATION_LLM_INITIAL
 ENV_CONSOLIDATION_LLM_MAX_BACKOFF = "HINDSIGHT_API_CONSOLIDATION_LLM_MAX_BACKOFF"
 ENV_CONSOLIDATION_LLM_TIMEOUT = "HINDSIGHT_API_CONSOLIDATION_LLM_TIMEOUT"
 ENV_CONSOLIDATION_LLM_LITELLMROUTER_CONFIG = "HINDSIGHT_API_CONSOLIDATION_LLM_LITELLMROUTER_CONFIG"
+ENV_CONSOLIDATION_LLM_EXTRA_BODY = "HINDSIGHT_API_CONSOLIDATION_LLM_EXTRA_BODY"
 
 ENV_EMBEDDINGS_PROVIDER = "HINDSIGHT_API_EMBEDDINGS_PROVIDER"
 ENV_EMBEDDINGS_LOCAL_MODEL = "HINDSIGHT_API_EMBEDDINGS_LOCAL_MODEL"
@@ -478,6 +479,7 @@ ENV_CONSOLIDATION_MAX_MEMORIES_PER_ROUND = "HINDSIGHT_API_CONSOLIDATION_MAX_MEMO
 ENV_CONSOLIDATION_LLM_BATCH_SIZE = "HINDSIGHT_API_CONSOLIDATION_LLM_BATCH_SIZE"
 ENV_CONSOLIDATION_DEDUP_THRESHOLD = "HINDSIGHT_API_CONSOLIDATION_DEDUP_THRESHOLD"
 ENV_CONSOLIDATION_LLM_PARALLELISM = "HINDSIGHT_API_CONSOLIDATION_LLM_PARALLELISM"
+ENV_CONSOLIDATION_SCOPE_CONCURRENCY = "HINDSIGHT_API_CONSOLIDATION_SCOPE_CONCURRENCY"
 ENV_CONSOLIDATION_MAX_TOKENS = "HINDSIGHT_API_CONSOLIDATION_MAX_TOKENS"
 ENV_CONSOLIDATION_MAX_COMPLETION_TOKENS = "HINDSIGHT_API_CONSOLIDATION_MAX_COMPLETION_TOKENS"
 ENV_CONSOLIDATION_SOURCE_FACTS_MAX_TOKENS = "HINDSIGHT_API_CONSOLIDATION_SOURCE_FACTS_MAX_TOKENS"
@@ -948,6 +950,12 @@ DEFAULT_CONSOLIDATION_DEDUP_THRESHOLD = 0.97
 DEFAULT_CONSOLIDATION_LLM_PARALLELISM = (
     4  # Max tag groups consolidated concurrently per op. Locks on overlapping write
     # scopes degrade to sequential automatically; matches retain_max_concurrent.
+)
+DEFAULT_CONSOLIDATION_SCOPE_CONCURRENCY = (
+    1  # Concurrent facts allowed per write-scope. 1 = serial merge-as-you-go: each fact
+    # sees prior facts' observations and merges into them (correct for interactive use).
+    # K>1 lets K facts per scope consolidate concurrently for bulk parallel runs; the
+    # K-way merge races are reconciled by the dedup pass. Default 1 preserves behavior.
 )
 DEFAULT_CONSOLIDATION_MAX_TOKENS = 512  # Max tokens for recall when finding related observations
 # Unset by default: the key is omitted from the LLM call so every provider keeps its current implicit output
@@ -1582,6 +1590,10 @@ class HindsightConfig:
     consolidation_llm_max_backoff: float | None
     consolidation_llm_timeout: float | None
     consolidation_llm_litellmrouter_config: dict | None
+    # Per-op consolidation override of llm_extra_body (reasoning sampling + vllm_xargs thinking budget).
+    # Env-only (intentionally NOT in _CONFIGURABLE_FIELDS): consolidation tunables stay single-source in
+    # env to avoid the bank-config-silently-overrides-env trap. Falls back to llm_extra_body when unset.
+    consolidation_llm_extra_body: dict | None
 
     # Embeddings
     embeddings_provider: str
@@ -1762,6 +1774,7 @@ class HindsightConfig:
     consolidation_max_memories_per_round: int
     consolidation_llm_batch_size: int
     consolidation_llm_parallelism: int
+    consolidation_scope_concurrency: int
     consolidation_max_tokens: int
     consolidation_max_completion_tokens: int | None
     consolidation_recall_budget: str
@@ -2350,6 +2363,7 @@ class HindsightConfig:
             if os.getenv(ENV_CONSOLIDATION_LLM_TIMEOUT)
             else None,
             consolidation_llm_litellmrouter_config=_parse_llm_router_config(ENV_CONSOLIDATION_LLM_LITELLMROUTER_CONFIG),
+            consolidation_llm_extra_body=json.loads(os.getenv(ENV_CONSOLIDATION_LLM_EXTRA_BODY, "null")),
             # Multi-LLM chains (indexed members + routing strategy)
             llm_members=_parse_llm_members(""),
             llm_strategy=_parse_llm_strategy(os.getenv(ENV_LLM_STRATEGY)),
@@ -2631,9 +2645,9 @@ class HindsightConfig:
             mental_model_refresh_concurrency=int(
                 os.getenv(ENV_MENTAL_MODEL_REFRESH_CONCURRENCY, str(DEFAULT_MENTAL_MODEL_REFRESH_CONCURRENCY))
             ),
-            mental_model_refresh_budget=os.getenv(
-                ENV_MENTAL_MODEL_REFRESH_BUDGET, DEFAULT_MENTAL_MODEL_REFRESH_BUDGET
-            ).strip().lower(),
+            mental_model_refresh_budget=os.getenv(ENV_MENTAL_MODEL_REFRESH_BUDGET, DEFAULT_MENTAL_MODEL_REFRESH_BUDGET)
+            .strip()
+            .lower(),
             link_expansion_per_entity_limit=int(
                 os.getenv(ENV_LINK_EXPANSION_PER_ENTITY_LIMIT, str(DEFAULT_LINK_EXPANSION_PER_ENTITY_LIMIT))
             ),
@@ -2779,6 +2793,15 @@ class HindsightConfig:
                     os.getenv(
                         ENV_CONSOLIDATION_LLM_PARALLELISM,
                         str(DEFAULT_CONSOLIDATION_LLM_PARALLELISM),
+                    )
+                ),
+            ),
+            consolidation_scope_concurrency=max(
+                1,
+                int(
+                    os.getenv(
+                        ENV_CONSOLIDATION_SCOPE_CONCURRENCY,
+                        str(DEFAULT_CONSOLIDATION_SCOPE_CONCURRENCY),
                     )
                 ),
             ),

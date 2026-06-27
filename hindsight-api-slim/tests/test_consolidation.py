@@ -2473,60 +2473,36 @@ class TestConsolidationSourceFactsConfig:
 
 
 class TestBuildResponseModel:
-    """Unit tests for _build_response_model (dynamic Pydantic model factory)."""
+    """Unit tests for _build_response_model.
 
-    def test_no_limit_returns_base_model(self):
-        """When max_creates is None or -1, the base model is returned."""
+    The per-scope create cap is intentionally NOT enforced as a Pydantic/JSON-schema
+    ``max_length`` on ``creates``: a hard cap made the ``json_object`` path reject whole
+    batches (``too_long``) -> a steady ``consolidation_failed_at`` trickle. The factory now
+    always returns the unconstrained base model; the cap is enforced by caller-side
+    truncation in ``_process_one_llm_batch`` (see the function docstring). ``max_creates``
+    is retained for call-site clarity / possible future strict-grammar use.
+    """
+
+    def test_always_returns_base_model(self):
+        """For every max_creates value the unconstrained base model is returned."""
         from hindsight_api.engine.consolidation.consolidator import _ConsolidationBatchResponse
 
-        assert _build_response_model(None) is _ConsolidationBatchResponse
-        assert _build_response_model(-1) is _ConsolidationBatchResponse
+        for mc in (None, -1, 0, 2, 100):
+            assert _build_response_model(mc) is _ConsolidationBatchResponse
 
-    def test_zero_limit_forbids_creates(self):
-        """When max_creates=0, the model rejects any creates."""
-        model = _build_response_model(0)
-        # Valid: no creates
-        result = model(creates=[], updates=[], deletes=[])
-        assert result.creates == []
-
-        # Invalid: one create should be rejected
-        from pydantic import ValidationError
-
-        with pytest.raises(ValidationError):
-            model(
-                creates=[{"text": "obs", "source_fact_ids": ["abc"]}],
-                updates=[],
-                deletes=[],
-            )
-
-    def test_positive_limit_allows_up_to_max(self):
-        """When max_creates=2, exactly 2 creates are allowed but 3 are rejected."""
-        model = _build_response_model(2)
-
-        # 2 creates OK
+    def test_creates_not_schema_constrained(self):
+        """The model no longer rejects creates over the (former) cap — cap is caller-side."""
+        model = _build_response_model(0)  # formerly forbade all creates
         result = model(
             creates=[
                 {"text": "obs1", "source_fact_ids": ["a"]},
                 {"text": "obs2", "source_fact_ids": ["b"]},
+                {"text": "obs3", "source_fact_ids": ["c"]},
             ],
             updates=[],
             deletes=[],
         )
-        assert len(result.creates) == 2
-
-        # 3 creates rejected
-        from pydantic import ValidationError
-
-        with pytest.raises(ValidationError):
-            model(
-                creates=[
-                    {"text": "obs1", "source_fact_ids": ["a"]},
-                    {"text": "obs2", "source_fact_ids": ["b"]},
-                    {"text": "obs3", "source_fact_ids": ["c"]},
-                ],
-                updates=[],
-                deletes=[],
-            )
+        assert len(result.creates) == 3
 
     def test_updates_and_deletes_unconstrained(self):
         """max_creates does not affect updates or deletes."""
@@ -2542,12 +2518,12 @@ class TestBuildResponseModel:
         assert len(result.updates) == 2
         assert len(result.deletes) == 1
 
-    def test_json_schema_contains_max_items(self):
-        """The generated model's JSON schema should include maxItems for creates."""
+    def test_json_schema_has_no_max_items(self):
+        """The schema no longer constrains creates with maxItems (cap is caller-side)."""
         model = _build_response_model(3)
         schema = model.model_json_schema()
         creates_prop = schema["properties"]["creates"]
-        assert creates_prop.get("maxItems") == 3
+        assert "maxItems" not in creates_prop
 
 
 class TestConsolidationPromptCapacity:

@@ -1141,7 +1141,7 @@ class MemoryEngine(MemoryEngineInterface):
             base_url=consolidation_base_url,
             model=consolidation_model,
             reasoning_effort=config.llm_reasoning_effort,
-            extra_body=config.llm_extra_body,
+            extra_body=config.consolidation_llm_extra_body or config.llm_extra_body,
             default_headers=config.llm_default_headers,
             litellmrouter_config=config.consolidation_llm_litellmrouter_config or config.llm_litellmrouter_config,
             bedrock_service_tier=config.llm_bedrock_service_tier,
