@@ -10423,10 +10423,24 @@ class MemoryEngine(MemoryEngineInterface):
                 f"- Structure the document around the topic, not around the sources."
             )
 
+            # Force the refresh reflect to run at a high budget by default. At
+            # low/mid budget the reflect agent can short-circuit on a fresh,
+            # usable mental model and skip reading its observations (see
+            # engine/reflect/agent.py — the gate is `(budget or "low") != "high"`).
+            # A refresh MUST re-synthesize from the underlying observations every
+            # time, so it has to run at HIGH. There is no per-bank API field for
+            # this, hence the server-level HINDSIGHT_API_MENTAL_MODEL_REFRESH_BUDGET.
+            refresh_budget_raw = (get_config().mental_model_refresh_budget or "high").strip().lower()
+            try:
+                refresh_budget = Budget(refresh_budget_raw)
+            except ValueError:
+                refresh_budget = Budget.HIGH
+
             reflect_kwargs: dict[str, Any] = dict(
                 bank_id=bank_id,
                 query=mental_model["source_query"],
                 context=refresh_context,
+                budget=refresh_budget,
                 request_context=request_context,
                 tags=tag_filtering.tags,
                 tags_match=tag_filtering.tags_match,

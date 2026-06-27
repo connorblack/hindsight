@@ -389,6 +389,7 @@ ENV_RECALL_MAX_CONCURRENT = "HINDSIGHT_API_RECALL_MAX_CONCURRENT"
 ENV_RECALL_CONNECTION_BUDGET = "HINDSIGHT_API_RECALL_CONNECTION_BUDGET"
 ENV_RECALL_MAX_QUERY_TOKENS = "HINDSIGHT_API_RECALL_MAX_QUERY_TOKENS"
 ENV_MENTAL_MODEL_REFRESH_CONCURRENCY = "HINDSIGHT_API_MENTAL_MODEL_REFRESH_CONCURRENCY"
+ENV_MENTAL_MODEL_REFRESH_BUDGET = "HINDSIGHT_API_MENTAL_MODEL_REFRESH_BUDGET"
 ENV_LINK_EXPANSION_PER_ENTITY_LIMIT = "HINDSIGHT_API_LINK_EXPANSION_PER_ENTITY_LIMIT"
 ENV_LINK_EXPANSION_TIMEOUT = "HINDSIGHT_API_LINK_EXPANSION_TIMEOUT"
 ENV_BANK_STATS_CACHE_TTL_SECONDS = "HINDSIGHT_API_BANK_STATS_CACHE_TTL_SECONDS"
@@ -869,6 +870,12 @@ DEFAULT_RECALL_MAX_CONCURRENT = 32  # Max concurrent recall operations per worke
 DEFAULT_RECALL_CONNECTION_BUDGET = 4  # Max concurrent DB connections per recall operation
 DEFAULT_RECALL_MAX_QUERY_TOKENS = 500  # Maximum tokens allowed in recall query
 DEFAULT_MENTAL_MODEL_REFRESH_CONCURRENCY = 8  # Max concurrent mental model refreshes
+# Budget level for the internal reflect run by a mental-model refresh. HIGH by
+# default so a refresh re-synthesizes from the underlying observations every
+# time: at low/mid budget the reflect agent can short-circuit on a fresh mental
+# model and skip reading its observations (see engine/reflect/agent.py). One of
+# "low" | "mid" | "high" (maps to the Budget enum at the refresh call site).
+DEFAULT_MENTAL_MODEL_REFRESH_BUDGET = "high"
 DEFAULT_LINK_EXPANSION_PER_ENTITY_LIMIT = 200  # Max target units per entity in graph expansion
 DEFAULT_LINK_EXPANSION_TIMEOUT = 10.0  # Timeout (seconds) for entity expansion query
 DEFAULT_BANK_STATS_CACHE_TTL_SECONDS = 60.0  # TTL for get_bank_stats result cache; 0 disables
@@ -1695,6 +1702,7 @@ class HindsightConfig:
     recall_connection_budget: int
     recall_max_query_tokens: int
     mental_model_refresh_concurrency: int
+    mental_model_refresh_budget: str
     link_expansion_per_entity_limit: int
     link_expansion_timeout: float
     bank_stats_cache_ttl_seconds: float
@@ -2623,6 +2631,9 @@ class HindsightConfig:
             mental_model_refresh_concurrency=int(
                 os.getenv(ENV_MENTAL_MODEL_REFRESH_CONCURRENCY, str(DEFAULT_MENTAL_MODEL_REFRESH_CONCURRENCY))
             ),
+            mental_model_refresh_budget=os.getenv(
+                ENV_MENTAL_MODEL_REFRESH_BUDGET, DEFAULT_MENTAL_MODEL_REFRESH_BUDGET
+            ).strip().lower(),
             link_expansion_per_entity_limit=int(
                 os.getenv(ENV_LINK_EXPANSION_PER_ENTITY_LIMIT, str(DEFAULT_LINK_EXPANSION_PER_ENTITY_LIMIT))
             ),
