@@ -8,7 +8,8 @@ the path stochastically.
 import types
 import uuid
 from dataclasses import dataclass
-from unittest.mock import AsyncMock, patch
+from datetime import datetime, timezone
+from unittest.mock import AsyncMock, MagicMock, patch
 
 from hindsight_api.engine.consolidation.consolidator import (
     _dedup_active,
@@ -16,6 +17,8 @@ from hindsight_api.engine.consolidation.consolidator import (
     _dedup_reconcile_update,
     _DedupDecision,
     _duplicate_create_target,
+    _duplicate_obs_key,
+    _execute_update_action,
     _norm_obs_text,
 )
 from hindsight_api.engine.search.types import RetrievalResult
@@ -25,10 +28,21 @@ from hindsight_api.engine.search.types import RetrievalResult
 class _FakeObs:
     id: str
     text: str
+    occurred_start: object | None = None
+    occurred_end: object | None = None
+    event_date: object | None = None
 
 
 def _shown(*observations: _FakeObs) -> dict[str, _FakeObs]:
-    return {_norm_obs_text(o.text): o for o in observations}
+    return {
+        _duplicate_obs_key(
+            o.text,
+            occurred_start=o.occurred_start,
+            occurred_end=o.occurred_end,
+            event_date=o.event_date,
+        ): o
+        for o in observations
+    }
 
 
 def test_norm_obs_text_collapses_whitespace_preserves_case() -> None:
@@ -53,9 +67,44 @@ def test_create_differing_only_in_case_is_not_duplicate() -> None:
 
 
 def test_create_matching_inresponse_update_is_duplicate() -> None:
-    update_texts = {_norm_obs_text("Mint is kept in its own separate bed.")}
+    update_texts = {_duplicate_obs_key("Mint is kept in its own separate bed.")}
     target = _duplicate_create_target("Mint is kept in its own separate bed.", {}, update_texts)
     assert target == "an UPDATE in this response"
+
+
+def test_create_same_text_different_time_is_not_duplicate() -> None:
+    shown = _shown(
+        _FakeObs(
+            id="11111111-aaaa",
+            text="User watered the herbs.",
+            occurred_start="2024-01-15T10:30:00Z",
+        )
+    )
+    target = _duplicate_create_target(
+        "User watered the herbs.",
+        shown,
+        set(),
+        occurred_start=datetime(2024, 1, 16, 10, 30, tzinfo=timezone.utc),
+    )
+    assert target is None
+
+
+def test_create_same_text_same_time_is_duplicate() -> None:
+    shown = _shown(
+        _FakeObs(
+            id="11111111-aaaa",
+            text="User watered the herbs.",
+            occurred_start="2024-01-15T10:30:00Z",
+        )
+    )
+    target = _duplicate_create_target(
+        "User watered the herbs.",
+        shown,
+        set(),
+        occurred_start=datetime(2024, 1, 15, 10, 30, tzinfo=timezone.utc),
+    )
+    assert target is not None
+    assert target.startswith("shown observation 11111111")
 
 
 def test_novel_create_is_not_duplicate() -> None:
@@ -79,6 +128,7 @@ def _obs(text: str, sim: float, oid: str = _TWIN_ID) -> RetrievalResult:
 def _ctx(threshold: float = 0.97):
     """Return (kwargs, conn_mock, llm_mock) for a _dedup_reconcile_create call."""
     conn = AsyncMock()
+    conn.execute.return_value = "UPDATE 1"
     llm = types.SimpleNamespace(call=AsyncMock())
     kwargs = dict(
         conn=conn,
@@ -164,6 +214,9 @@ _UPDATED_ID = "44444444-4444-4444-8444-444444444444"
 def _update_ctx(threshold: float = 0.97):
     """Return (kwargs, conn_mock, llm_mock) for a _dedup_reconcile_update call."""
     conn = AsyncMock()
+    conn.execute.side_effect = ["UPDATE 1", "DELETE 1"]
+    conn.fetch.return_value = [{"id": uuid.UUID(_TWIN_ID)}, {"id": uuid.UUID(_UPDATED_ID)}]
+    conn.transaction = MagicMock(return_value=AsyncMock())
     llm = types.SimpleNamespace(call=AsyncMock())
     kwargs = dict(
         conn=conn,
@@ -185,9 +238,15 @@ async def test_dedup_update_merge_folds_into_twin_and_deletes_updated() -> None:
     with _patch_probe([_obs("Uzbek content on YouTube is described as very rich.", 0.98)]):
         await _dedup_reconcile_update(**kwargs)
     llm.call.assert_awaited_once()
+    conn.fetch.assert_awaited_once()
+    lock_args = conn.fetch.await_args.args
+    assert "ORDER BY id" in lock_args[0]
+    assert "FOR UPDATE" in lock_args[0]
+    assert lock_args[1] == [uuid.UUID(_TWIN_ID), uuid.UUID(_UPDATED_ID)]
     # Two writes: fold-into-twin UPDATE, then DELETE of the updated row.
     assert conn.execute.await_count == 2
     fold_args = conn.execute.await_args_list[0].args
+    assert "t.tags || u.tags" in fold_args[0]
     assert fold_args[1] == "Uzbek YouTube content is very rich and growing."  # merged text on the twin
     assert fold_args[2] == uuid.UUID(_TWIN_ID)  # survivor = the twin
     assert fold_args[3] == uuid.UUID(_UPDATED_ID)  # folded-from = the updated row
@@ -220,6 +279,69 @@ async def test_dedup_update_no_twin_above_threshold() -> None:
         await _dedup_reconcile_update(**kwargs)
     llm.call.assert_not_called()
     conn.execute.assert_not_called()
+
+
+async def test_execute_update_action_postgres_appends_sources_tags_and_temporal_fields() -> None:
+    obs_id = uuid.uuid4()
+    source_id = uuid.uuid4()
+    occurred_start = datetime(2024, 1, 15, 10, 30, tzinfo=timezone.utc)
+    occurred_end = datetime(2024, 1, 15, 11, 30, tzinfo=timezone.utc)
+    mentioned_at = datetime(2024, 1, 16, 9, 0, tzinfo=timezone.utc)
+    conn = AsyncMock()
+    conn.fetch.return_value = [{"id": source_id}]
+    conn.fetchrow.return_value = {"id": obs_id}
+    memory_engine = types.SimpleNamespace(
+        embeddings=object(),
+        _backend=types.SimpleNamespace(ops=types.SimpleNamespace(uses_observation_sources_table=False)),
+    )
+    observations = [
+        types.SimpleNamespace(
+            id=str(obs_id),
+            text="Old observation",
+            tags=["existing"],
+            source_fact_ids=[str(uuid.uuid4())],
+            occurred_start=None,
+            occurred_end=None,
+            mentioned_at=None,
+        )
+    ]
+
+    with (
+        _patch_embed(),
+        patch(
+            "hindsight_api.config.get_config",
+            return_value=types.SimpleNamespace(enable_observation_history=False),
+        ),
+    ):
+        result = await _execute_update_action(
+            conn=conn,
+            memory_engine=memory_engine,
+            bank_id="bank1",
+            source_memory_ids=[source_id],
+            observation_id=str(obs_id),
+            new_text="Updated observation",
+            observations=observations,
+            source_fact_tags=["new-tag"],
+            source_occurred_start=occurred_start,
+            source_occurred_end=occurred_end,
+            source_mentioned_at=mentioned_at,
+        )
+
+    assert result.status == "updated"
+    assert result.embedding_str == "[0.1, 0.2, 0.3]"
+    assert result.live_source_memory_ids == [source_id]
+    sql = conn.fetchrow.await_args.args[0]
+    assert "source_memory_ids = (SELECT array_agg(DISTINCT e)" in sql
+    assert "tags              = (SELECT array_agg(DISTINCT e)" in sql
+    args = conn.fetchrow.await_args.args
+    assert args[1] == "Updated observation"
+    assert args[2] == "[0.1, 0.2, 0.3]"
+    assert args[3] == [source_id]
+    assert args[4] == ["new-tag"]
+    assert args[5] == obs_id
+    assert args[6] == occurred_start
+    assert args[7] == occurred_end
+    assert args[8] == mentioned_at
 
 
 # ── dedup activation gate (_dedup_active) ─────────────────────────────────────

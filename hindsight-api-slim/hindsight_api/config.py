@@ -234,6 +234,7 @@ ENV_CONSOLIDATION_LLM_MAX_BACKOFF = "HINDSIGHT_API_CONSOLIDATION_LLM_MAX_BACKOFF
 ENV_CONSOLIDATION_LLM_TIMEOUT = "HINDSIGHT_API_CONSOLIDATION_LLM_TIMEOUT"
 ENV_CONSOLIDATION_LLM_LITELLMROUTER_CONFIG = "HINDSIGHT_API_CONSOLIDATION_LLM_LITELLMROUTER_CONFIG"
 ENV_CONSOLIDATION_LLM_EXTRA_BODY = "HINDSIGHT_API_CONSOLIDATION_LLM_EXTRA_BODY"
+ENV_CONSOLIDATION_RAMP_STEP_MS = "HINDSIGHT_API_CONSOLIDATION_RAMP_STEP_MS"
 
 ENV_EMBEDDINGS_PROVIDER = "HINDSIGHT_API_EMBEDDINGS_PROVIDER"
 ENV_EMBEDDINGS_LOCAL_MODEL = "HINDSIGHT_API_EMBEDDINGS_LOCAL_MODEL"
@@ -956,6 +957,12 @@ DEFAULT_CONSOLIDATION_SCOPE_CONCURRENCY = (
     # sees prior facts' observations and merges into them (correct for interactive use).
     # K>1 lets K facts per scope consolidate concurrently for bulk parallel runs; the
     # K-way merge races are reconciled by the dedup pass. Default 1 preserves behavior.
+)
+DEFAULT_CONSOLIDATION_RAMP_STEP_MS = (
+    0  # Gradual concurrency ramp-up for bulk runs. 0 = disabled (admit all
+    # consolidation_llm_parallelism permits at once, original behavior). >0 = release
+    # ~P/16 permits every this-many ms so concurrency climbs smoothly to the cap instead
+    # of a thundering herd that stampedes cold inference replicas / the DB pool at start.
 )
 DEFAULT_CONSOLIDATION_MAX_TOKENS = 512  # Max tokens for recall when finding related observations
 # Unset by default: the key is omitted from the LLM call so every provider keeps its current implicit output
@@ -1775,6 +1782,7 @@ class HindsightConfig:
     consolidation_llm_batch_size: int
     consolidation_llm_parallelism: int
     consolidation_scope_concurrency: int
+    consolidation_ramp_step_ms: int
     consolidation_max_tokens: int
     consolidation_max_completion_tokens: int | None
     consolidation_recall_budget: str
@@ -2802,6 +2810,15 @@ class HindsightConfig:
                     os.getenv(
                         ENV_CONSOLIDATION_SCOPE_CONCURRENCY,
                         str(DEFAULT_CONSOLIDATION_SCOPE_CONCURRENCY),
+                    )
+                ),
+            ),
+            consolidation_ramp_step_ms=max(
+                0,
+                int(
+                    os.getenv(
+                        ENV_CONSOLIDATION_RAMP_STEP_MS,
+                        str(DEFAULT_CONSOLIDATION_RAMP_STEP_MS),
                     )
                 ),
             ),
