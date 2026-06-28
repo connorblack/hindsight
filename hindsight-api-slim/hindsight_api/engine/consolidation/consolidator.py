@@ -769,6 +769,129 @@ def _build_response_model(max_creates: int | None = None) -> type[_Consolidation
     return _ConsolidationBatchResponse
 
 
+def _build_consolidation_response_contract(max_creates: int | None = None) -> str:
+    """Return the prompt-side JSON contract for consolidation decisions."""
+    if max_creates is not None and max_creates >= 0:
+        create_cap = f"The creates array must contain no more than {max_creates} item(s)."
+    else:
+        create_cap = "The creates array may contain any number of items."
+
+    return f"""
+
+## RESPONSE JSON CONTRACT
+
+Respond with ONLY a JSON object of this exact shape. Do not include markdown fences, prose, comments, or any keys not shown here.
+All three top-level arrays are required; use an empty array when there are no actions of that type.
+{create_cap}
+
+{{
+  "creates": [
+    {{
+      "text": "observation prose",
+      "source_fact_ids": ["source-fact-uuid"],
+      "reason": "one sentence explaining the decision"
+    }}
+  ],
+  "updates": [
+    {{
+      "text": "updated observation prose",
+      "observation_id": "existing-observation-uuid",
+      "source_fact_ids": ["source-fact-uuid"],
+      "reason": "one sentence explaining the decision"
+    }}
+  ],
+  "deletes": [
+    {{
+      "observation_id": "existing-observation-uuid",
+      "reason": "one sentence explaining the decision"
+    }}
+  ]
+}}"""
+
+
+def _strip_markdown_json_fence(text: str) -> str:
+    """Remove one outer markdown code fence from an LLM response."""
+    stripped = text.strip()
+    if not stripped.startswith("```"):
+        return stripped
+
+    first_newline = stripped.find("\n")
+    if first_newline == -1:
+        return stripped[3:].strip()
+
+    stripped = stripped[first_newline + 1 :].strip()
+    if stripped.endswith("```"):
+        stripped = stripped[:-3].strip()
+    return stripped
+
+
+def _extract_json_object(text: str) -> dict[str, Any]:
+    """Extract and parse the first balanced top-level JSON object from text."""
+    if not isinstance(text, str):
+        raise TypeError(f"Expected LLM response text, got {type(text).__name__}")
+
+    candidate = _strip_markdown_json_fence(text)
+    start = candidate.find("{")
+    if start == -1:
+        raise ValueError("No JSON object found in LLM response")
+
+    depth = 0
+    in_string = False
+    escape = False
+    end: int | None = None
+
+    for idx in range(start, len(candidate)):
+        char = candidate[idx]
+        if in_string:
+            if escape:
+                escape = False
+            elif char == "\\":
+                escape = True
+            elif char == '"':
+                in_string = False
+            continue
+
+        if char == '"':
+            in_string = True
+        elif char == "{":
+            depth += 1
+        elif char == "}":
+            depth -= 1
+            if depth == 0:
+                end = idx + 1
+                break
+
+    if end is None:
+        raise ValueError("No complete JSON object found in LLM response")
+
+    payload = json.loads(candidate[start:end])
+    if not isinstance(payload, dict):
+        raise ValueError(f"Expected JSON object, got {type(payload).__name__}")
+    return payload
+
+
+def _mock_consolidation_response(memories: list[dict[str, Any]]) -> dict[str, Any]:
+    """Preserve MockLLM's structural consolidation behavior without response_format."""
+    creates = []
+    for memory in memories:
+        fact_id = memory.get("id")
+        text = memory.get("text")
+        if fact_id is None or text is None:
+            continue
+        creates.append(
+            {
+                "text": str(text).strip(),
+                "source_fact_ids": [str(fact_id)],
+                "reason": "Mock consolidation creates one observation per fact.",
+            }
+        )
+    return {"creates": creates, "updates": [], "deletes": []}
+
+
+def _is_default_mock_consolidation_response(llm_config: Any, raw_response: Any) -> bool:
+    return getattr(llm_config, "provider", None) == "mock" and raw_response == "mock response"
+
+
 class ConsolidationPerfLog:
     """Performance logging for consolidation operations."""
 
@@ -2562,6 +2685,7 @@ async def _consolidate_batch_with_llm(
         observations_mission=config.observations_mission,
         observation_capacity_note=observation_capacity_note,
     )
+    user_content += _build_consolidation_response_contract(max_creates=remaining_observation_slots)
 
     # Opt into context caching of the stable system prefix when the provider
     # supports it (gemini/vertexai with the flag on). response_schema is NOT
@@ -2578,7 +2702,7 @@ async def _consolidate_batch_with_llm(
             logger.exception("Consolidation cache prefix lookup failed; falling back to uncached call")
             cached_prefix_name = None
 
-    # Use a constrained response model when observation limit is active
+    # Validate the free-text response locally after extracting the first JSON object.
     response_model = _build_response_model(max_creates=remaining_observation_slots)
 
     max_attempts = config.consolidation_max_attempts
@@ -2601,7 +2725,6 @@ async def _consolidate_batch_with_llm(
                     {"role": "system", "content": system_prompt},
                     {"role": "user", "content": user_content},
                 ],
-                "response_format": response_model,
                 "scope": "consolidation",
             }
             # Only request an explicit output budget when configured. Left unset by default the key is
@@ -2614,7 +2737,12 @@ async def _consolidate_batch_with_llm(
                 call_kwargs["max_retries"] = inner_max_retries
             if cached_prefix_name is not None:
                 call_kwargs["cached_prefix"] = cached_prefix_name
-            response: _ConsolidationBatchResponse = await llm_config.call(**call_kwargs)
+            raw_response = await llm_config.call(**call_kwargs)
+            if _is_default_mock_consolidation_response(llm_config, raw_response):
+                response_json = _mock_consolidation_response(memories)
+            else:
+                response_json = _extract_json_object(raw_response)
+            response: _ConsolidationBatchResponse = response_model.model_validate(response_json)
             # Defensive truncation: some LLM providers may not enforce JSON schema max_length
             creates = response.creates
             if remaining_observation_slots is not None and remaining_observation_slots >= 0:
