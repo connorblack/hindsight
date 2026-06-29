@@ -40,6 +40,81 @@ from .types import GraphRetrievalTimings, RetrievalResult
 
 logger = logging.getLogger(__name__)
 
+_LINK_EXPANSION_CPU_OFFLOAD_ROW_THRESHOLD = 200
+_LINK_EXPANSION_CPU_OFFLOAD_CHAR_THRESHOLD = 16_384
+
+
+def _link_expansion_rows_are_heavy(
+    entity_rows: list[Any],
+    semantic_rows: list[Any],
+    causal_rows: list[Any],
+) -> bool:
+    if len(entity_rows) + len(semantic_rows) + len(causal_rows) >= _LINK_EXPANSION_CPU_OFFLOAD_ROW_THRESHOLD:
+        return True
+
+    total_chars = 0
+    for rows in (entity_rows, semantic_rows, causal_rows):
+        for row in rows:
+            total_chars += len(row["text"] or "")
+            if total_chars >= _LINK_EXPANSION_CPU_OFFLOAD_CHAR_THRESHOLD:
+                return True
+    return False
+
+
+def _merge_link_expansion_rows(
+    entity_rows: list[Any],
+    semantic_rows: list[Any],
+    causal_rows: list[Any],
+    budget: int,
+    tags: list[str] | None,
+    tags_match: TagsMatch,
+    tag_groups: list[TagGroup] | None,
+) -> list[RetrievalResult]:
+    entity_scores: dict[str, float] = {}
+    semantic_scores: dict[str, float] = {}
+    causal_scores: dict[str, float] = {}
+    row_map: dict[str, dict] = {}
+
+    for row in entity_rows:
+        fact_id = str(row["id"])
+        entity_scores[fact_id] = math.tanh(row["score"] * 0.5)
+        row_map[fact_id] = dict(row)
+
+    for row in semantic_rows:
+        fact_id = str(row["id"])
+        semantic_scores[fact_id] = max(semantic_scores.get(fact_id, 0.0), row["score"])
+        row_map.setdefault(fact_id, dict(row))
+
+    for row in causal_rows:
+        fact_id = str(row["id"])
+        causal_scores[fact_id] = max(causal_scores.get(fact_id, 0.0), row["score"])
+        row_map.setdefault(fact_id, dict(row))
+
+    all_ids = set(entity_scores) | set(semantic_scores) | set(causal_scores)
+    score_map = {
+        fid: entity_scores.get(fid, 0.0) + semantic_scores.get(fid, 0.0) + causal_scores.get(fid, 0.0)
+        for fid in all_ids
+    }
+
+    sorted_ids = sorted(score_map.keys(), key=lambda x: score_map[x], reverse=True)[:budget]
+    rows = [row_map[fact_id] for fact_id in sorted_ids]
+
+    results = []
+    for row in rows:
+        result = RetrievalResult.from_db_row(dict(row))
+        result.activation = row["score"]
+        results.append(result)
+
+    # filter_results_by_tags is a no-op when no filter applies (tags falsy and not
+    # the exact-empty/global scope), so call it unconditionally — gating on `if tags:`
+    # would skip the untagged-only filter for tags=[] + tags_match="exact".
+    results = filter_results_by_tags(results, tags, match=tags_match)
+
+    if tag_groups:
+        results = filter_results_by_tag_groups(results, tag_groups)
+
+    return results
+
 
 async def _find_semantic_seeds(
     conn,
@@ -216,48 +291,28 @@ class LinkExpansionRetriever(GraphRetriever):
         #
         # Facts appearing in multiple signals accumulate higher scores, rewarding
         # convergent evidence. The outer RRF uses rank position from this sorted list.
-        entity_scores: dict[str, float] = {}
-        semantic_scores: dict[str, float] = {}
-        causal_scores: dict[str, float] = {}
-        row_map: dict[str, dict] = {}
-
-        for row in entity_rows:
-            fact_id = str(row["id"])
-            entity_scores[fact_id] = math.tanh(row["score"] * 0.5)
-            row_map[fact_id] = dict(row)
-
-        for row in semantic_rows:
-            fact_id = str(row["id"])
-            semantic_scores[fact_id] = max(semantic_scores.get(fact_id, 0.0), row["score"])
-            row_map.setdefault(fact_id, dict(row))
-
-        for row in causal_rows:
-            fact_id = str(row["id"])
-            causal_scores[fact_id] = max(causal_scores.get(fact_id, 0.0), row["score"])
-            row_map.setdefault(fact_id, dict(row))
-
-        all_ids = set(entity_scores) | set(semantic_scores) | set(causal_scores)
-        score_map = {
-            fid: entity_scores.get(fid, 0.0) + semantic_scores.get(fid, 0.0) + causal_scores.get(fid, 0.0)
-            for fid in all_ids
-        }
-
-        sorted_ids = sorted(score_map.keys(), key=lambda x: score_map[x], reverse=True)[:budget]
-        rows = [row_map[fact_id] for fact_id in sorted_ids]
-
-        results = []
-        for row in rows:
-            result = RetrievalResult.from_db_row(dict(row))
-            result.activation = row["score"]
-            results.append(result)
-
-        # filter_results_by_tags is a no-op when no filter applies (tags falsy and not
-        # the exact-empty/global scope), so call it unconditionally — gating on `if tags:`
-        # would skip the untagged-only filter for tags=[] + tags_match="exact".
-        results = filter_results_by_tags(results, tags, match=tags_match)
-
-        if tag_groups:
-            results = filter_results_by_tag_groups(results, tag_groups)
+        if _link_expansion_rows_are_heavy(entity_rows, semantic_rows, causal_rows):
+            # Offload link-expansion row merge/sort to avoid event-loop starvation under high recall concurrency.
+            results = await asyncio.to_thread(
+                _merge_link_expansion_rows,
+                entity_rows,
+                semantic_rows,
+                causal_rows,
+                budget,
+                tags,
+                tags_match,
+                tag_groups,
+            )
+        else:
+            results = _merge_link_expansion_rows(
+                entity_rows,
+                semantic_rows,
+                causal_rows,
+                budget,
+                tags,
+                tags_match,
+                tag_groups,
+            )
 
         timings.result_count = len(results)
         timings.traverse = time.time() - start_time

@@ -356,6 +356,7 @@ from .reflect import run_reflect_agent
 from .reflect.tools import tool_expand, tool_recall, tool_search_mental_models, tool_search_observations
 from .response_models import (
     VALID_RECALL_FACT_TYPES,
+    ChunkInfo,
     DryRunExtractionResult,
     EntityState,
     LLMCallTrace,
@@ -386,6 +387,206 @@ from .token_encoding import get_token_encoding
 
 RetainOutboxCallback = Callable[[asyncpg.Connection], Awaitable[None]]
 RetainOutboxCallbackFactory = Callable[[list[RetainContentDict]], RetainOutboxCallback | None]
+
+_RECALL_CPU_OFFLOAD_CANDIDATE_THRESHOLD = 200
+_RECALL_TOKEN_OFFLOAD_TEXT_COUNT_THRESHOLD = 16
+_RECALL_TOKEN_OFFLOAD_CHAR_THRESHOLD = 16_384
+
+
+def _recall_candidate_work_is_heavy(*result_lists: list[Any] | None) -> bool:
+    return sum(len(results) for results in result_lists if results) >= _RECALL_CPU_OFFLOAD_CANDIDATE_THRESHOLD
+
+
+def _token_budget_work_is_heavy(results: list[dict[str, Any]]) -> bool:
+    if len(results) >= _RECALL_TOKEN_OFFLOAD_TEXT_COUNT_THRESHOLD:
+        return True
+
+    total_chars = 0
+    for result in results:
+        total_chars += len(result.get("text", "") or "")
+        if total_chars >= _RECALL_TOKEN_OFFLOAD_CHAR_THRESHOLD:
+            return True
+    return False
+
+
+def _row_text_work_is_heavy(rows: list[Any], text_field: str) -> bool:
+    if len(rows) >= _RECALL_TOKEN_OFFLOAD_TEXT_COUNT_THRESHOLD:
+        return True
+
+    total_chars = 0
+    for row in rows:
+        total_chars += len(row[text_field] or "")
+        if total_chars >= _RECALL_TOKEN_OFFLOAD_CHAR_THRESHOLD:
+            return True
+    return False
+
+
+def _source_fact_token_work_is_heavy(
+    source_fact_ids_by_obs: dict[str, list[str]],
+    source_ids_ordered: list[str],
+    source_rows: list[Any],
+) -> bool:
+    source_refs = sum(len(sids) for sids in source_fact_ids_by_obs.values())
+    if (
+        len(source_ids_ordered) >= _RECALL_TOKEN_OFFLOAD_TEXT_COUNT_THRESHOLD
+        or source_refs >= _RECALL_TOKEN_OFFLOAD_TEXT_COUNT_THRESHOLD
+    ):
+        return True
+    return _row_text_work_is_heavy(source_rows, "text")
+
+
+def _sort_recall_retrieval_arms(
+    semantic_results: list[Any],
+    bm25_results: list[Any],
+    graph_results: list[Any],
+    temporal_results: list[Any] | None,
+) -> None:
+    semantic_results.sort(key=lambda r: r.similarity if hasattr(r, "similarity") else 0, reverse=True)
+    bm25_results.sort(key=lambda r: r.bm25_score if hasattr(r, "bm25_score") else 0, reverse=True)
+    graph_results.sort(key=lambda r: r.activation if hasattr(r, "activation") else 0, reverse=True)
+    if temporal_results:
+        temporal_results.sort(key=lambda r: r.combined_score if hasattr(r, "combined_score") else 0, reverse=True)
+
+
+def _prefilter_merged_candidates(
+    merged_candidates: list[Any],
+    reranker_max_candidates: int,
+    strategy_boosts: dict[str, str],
+) -> tuple[list[Any], int]:
+    from .search.recall_boost import boosted_rrf_score
+
+    merged_candidates.sort(key=lambda mc: boosted_rrf_score(mc, strategy_boosts), reverse=True)
+    pre_filtered_count = len(merged_candidates) - reranker_max_candidates
+    return merged_candidates[:reranker_max_candidates], pre_filtered_count
+
+
+def _build_passthrough_scored_results(merged_candidates: list[Any]) -> list[ScoredResult]:
+    return [
+        ScoredResult(
+            candidate=mc,
+            cross_encoder_score=0.0,
+            cross_encoder_score_normalized=0.0,
+            weight=0.0,
+        )
+        for mc in sorted(merged_candidates, key=lambda mc: mc.rrf_score, reverse=True)
+    ]
+
+
+def _apply_combined_scoring_and_sort(
+    scored_results: list[ScoredResult],
+    *,
+    now: datetime,
+    is_passthrough_reranker: bool,
+    recency_decay_function: str,
+    recency_decay_linear_window_days: float,
+    recency_decay_halflife_days: float,
+    strategy_boosts: dict[str, str],
+) -> None:
+    apply_combined_scoring(
+        scored_results,
+        now=now,
+        is_passthrough_reranker=is_passthrough_reranker,
+        recency_decay_function=recency_decay_function,
+        recency_decay_linear_window_days=recency_decay_linear_window_days,
+        recency_decay_halflife_days=recency_decay_halflife_days,
+    )
+    if strategy_boosts:
+        from .search.recall_boost import additive_strategy_boost
+
+        for sr in scored_results:
+            sr.weight += additive_strategy_boost(sr.candidate.source_ranks, strategy_boosts)
+    scored_results.sort(key=lambda x: x.weight, reverse=True)
+
+
+def _build_chunks_with_token_budget(
+    chunk_ids_ordered: list[str],
+    chunks_rows: list[Any],
+    max_chunk_tokens: int,
+) -> tuple[dict[str, ChunkInfo], int]:
+    chunks_dict: dict[str, ChunkInfo] = {}
+    total_chunk_tokens = 0
+    encoding = _get_tiktoken_encoding()
+    chunks_lookup = {row["chunk_id"]: row for row in chunks_rows}
+
+    # Process chunks in relevance order, respecting token budget.
+    for chunk_id in chunk_ids_ordered:
+        if chunk_id not in chunks_lookup:
+            continue
+
+        row = chunks_lookup[chunk_id]
+        chunk_text = row["chunk_text"]
+        chunk_tokens = len(encoding.encode(chunk_text))
+
+        if total_chunk_tokens + chunk_tokens > max_chunk_tokens:
+            remaining_tokens = max_chunk_tokens - total_chunk_tokens
+            if remaining_tokens > 0:
+                truncated_text = encoding.decode(encoding.encode(chunk_text)[:remaining_tokens])
+                chunks_dict[chunk_id] = ChunkInfo(
+                    chunk_text=truncated_text, chunk_index=row["chunk_index"], truncated=True
+                )
+                total_chunk_tokens = max_chunk_tokens
+            break
+        else:
+            chunks_dict[chunk_id] = ChunkInfo(chunk_text=chunk_text, chunk_index=row["chunk_index"], truncated=False)
+            total_chunk_tokens += chunk_tokens
+
+    return chunks_dict, total_chunk_tokens
+
+
+def _build_source_facts_with_token_budget(
+    source_fact_ids_by_obs: dict[str, list[str]],
+    source_ids_ordered: list[str],
+    source_rows: list[Any],
+    max_source_facts_tokens: int,
+    max_source_facts_tokens_per_observation: int,
+) -> dict[str, MemoryFact]:
+    source_row_by_id = {str(r["id"]): r for r in source_rows}
+    encoding = _get_tiktoken_encoding()
+    source_facts_dict: dict[str, MemoryFact] = {}
+
+    def _make_source_fact(sid: str, r: Any) -> MemoryFact:
+        return MemoryFact(
+            id=sid,
+            text=r["text"],
+            fact_type=r["fact_type"],
+            context=r["context"],
+            occurred_start=r["occurred_start"].isoformat() if r["occurred_start"] else None,
+            occurred_end=r["occurred_end"].isoformat() if r["occurred_end"] else None,
+            mentioned_at=r["mentioned_at"].isoformat() if r["mentioned_at"] else None,
+            document_id=r["document_id"],
+            metadata=r["metadata"],
+            chunk_id=str(r["chunk_id"]) if r["chunk_id"] else None,
+            tags=r["tags"] or None,
+        )
+
+    if max_source_facts_tokens_per_observation >= 0:
+        # Per-observation capping: each observation independently selects source facts up to its token budget.
+        for obs_id, sids in source_fact_ids_by_obs.items():
+            obs_tokens = 0
+            for sid in sids:
+                if sid not in source_row_by_id:
+                    continue
+                r = source_row_by_id[sid]
+                fact_tokens = len(encoding.encode(r["text"]))
+                if obs_tokens + fact_tokens > max_source_facts_tokens_per_observation:
+                    break
+                obs_tokens += fact_tokens
+                if sid not in source_facts_dict:
+                    source_facts_dict[sid] = _make_source_fact(sid, r)
+    else:
+        # Global budget: fill in order of first appearance until exhausted.
+        total_source_tokens = 0
+        for sid in source_ids_ordered:
+            if sid not in source_row_by_id:
+                continue
+            r = source_row_by_id[sid]
+            fact_tokens = len(encoding.encode(r["text"]))
+            if max_source_facts_tokens >= 0 and total_source_tokens + fact_tokens > max_source_facts_tokens:
+                break
+            source_facts_dict[sid] = _make_source_fact(sid, r)
+            total_source_tokens += fact_tokens
+
+    return source_facts_dict
 
 
 def _member_to_llm(member: "LLMMemberConfig", config: HindsightConfig) -> LLMConfig:
@@ -4449,13 +4650,17 @@ class MemoryEngine(MemoryEngineInterface):
 
             # Sort combined results by score (descending) so higher-scored results
             # get better ranks in the trace, regardless of fact type
-            semantic_results.sort(key=lambda r: r.similarity if hasattr(r, "similarity") else 0, reverse=True)
-            bm25_results.sort(key=lambda r: r.bm25_score if hasattr(r, "bm25_score") else 0, reverse=True)
-            graph_results.sort(key=lambda r: r.activation if hasattr(r, "activation") else 0, reverse=True)
-            if temporal_results:
-                temporal_results.sort(
-                    key=lambda r: r.combined_score if hasattr(r, "combined_score") else 0, reverse=True
+            if _recall_candidate_work_is_heavy(semantic_results, bm25_results, graph_results, temporal_results):
+                # Offload large result-arm sorts to avoid event-loop starvation under high recall concurrency.
+                await asyncio.to_thread(
+                    _sort_recall_retrieval_arms,
+                    semantic_results,
+                    bm25_results,
+                    graph_results,
+                    temporal_results,
                 )
+            else:
+                _sort_recall_retrieval_arms(semantic_results, bm25_results, graph_results, temporal_results)
 
             # Cap each source independently before fusion so a single
             # over-expanding backend (e.g. VectorChord returning hundreds of
@@ -4627,13 +4832,21 @@ class MemoryEngine(MemoryEngineInterface):
             fusion_span.set_attribute("hindsight.graph_count", len(graph_results))
             fusion_span.set_attribute("hindsight.temporal_count", len(temporal_results) if temporal_results else 0)
 
+            # Pre-bind before the try: the offloaded fuse() below is now an awaitable
+            # that can be cancelled mid-flight; the finally reads len(merged_candidates),
+            # so an unbound name would raise UnboundLocalError and mask the CancelledError.
+            merged_candidates: list = []
             try:
                 # Merge 3 or 4 result lists depending on temporal constraint
                 result_lists = [semantic_results, bm25_results, graph_results]
                 if temporal_results:
                     result_lists.append(temporal_results)
                 fuse = interleave_fusion if reranking == "interleave" else reciprocal_rank_fusion
-                merged_candidates = fuse(result_lists)
+                if _recall_candidate_work_is_heavy(*result_lists):
+                    # Offload large fusion merge/sort to avoid event-loop starvation under high recall concurrency.
+                    merged_candidates = await asyncio.to_thread(fuse, result_lists)
+                else:
+                    merged_candidates = fuse(result_lists)
 
                 step_duration = time.time() - step_start
                 log_buffer.append(
@@ -4672,12 +4885,21 @@ class MemoryEngine(MemoryEngineInterface):
                     # Sort by RRF score (boosted per-strategy if configured) and take top
                     # candidates. The weighted-RRF boost keeps boosted-arm candidates from
                     # being trimmed out of the reranker's global budget.
-                    from .search.recall_boost import boosted_rrf_score
-
                     strategy_boosts = get_config().recall_strategy_boosts
-                    merged_candidates.sort(key=lambda mc: boosted_rrf_score(mc, strategy_boosts), reverse=True)
-                    pre_filtered_count = len(merged_candidates) - reranker_max_candidates
-                    merged_candidates = merged_candidates[:reranker_max_candidates]
+                    if len(merged_candidates) >= _RECALL_CPU_OFFLOAD_CANDIDATE_THRESHOLD:
+                        # Offload large candidate prefilter sort to avoid event-loop starvation under high recall concurrency.
+                        merged_candidates, pre_filtered_count = await asyncio.to_thread(
+                            _prefilter_merged_candidates,
+                            merged_candidates,
+                            reranker_max_candidates,
+                            strategy_boosts,
+                        )
+                    else:
+                        merged_candidates, pre_filtered_count = _prefilter_merged_candidates(
+                            merged_candidates,
+                            reranker_max_candidates,
+                            strategy_boosts,
+                        )
 
                 if reranking == "cross_encoder":
                     # Cancellation checkpoint: the cross-encoder rerank is the
@@ -4699,15 +4921,11 @@ class MemoryEngine(MemoryEngineInterface):
                     # "twin") far below the budget cutoff (semantic rank #1 -> reranked #37),
                     # causing the LLM to never see it and create a duplicate.
                     rerank_kind = f"{reranking}-passthrough"
-                    scored_results = [
-                        ScoredResult(
-                            candidate=mc,
-                            cross_encoder_score=0.0,
-                            cross_encoder_score_normalized=0.0,
-                            weight=0.0,
-                        )
-                        for mc in sorted(merged_candidates, key=lambda mc: mc.rrf_score, reverse=True)
-                    ]
+                    if len(merged_candidates) >= _RECALL_CPU_OFFLOAD_CANDIDATE_THRESHOLD:
+                        # Offload large passthrough scoring sort to avoid event-loop starvation under high recall concurrency.
+                        scored_results = await asyncio.to_thread(_build_passthrough_scored_results, merged_candidates)
+                    else:
+                        scored_results = _build_passthrough_scored_results(merged_candidates)
 
                 step_duration = time.time() - step_start
                 pre_filter_note = f" (pre-filtered {pre_filtered_count})" if pre_filtered_count > 0 else ""
@@ -4745,23 +4963,20 @@ class MemoryEngine(MemoryEngineInterface):
                 # "rrf" mode is passthrough by construction; so is a configured "rrf" CE.
                 is_passthrough = (reranking == "rrf") or (ce is not None and ce.provider_name == "rrf")
                 scoring_config = get_config()
-                apply_combined_scoring(
-                    scored_results,
-                    now=_recall_scoring_now(question_date),
-                    is_passthrough_reranker=is_passthrough,
-                    recency_decay_function=scoring_config.recency_decay_function,
-                    recency_decay_linear_window_days=scoring_config.recency_decay_linear_window_days,
-                    recency_decay_halflife_days=scoring_config.recency_decay_halflife_days,
-                )
-                # Per-strategy additive boost: nudge candidates surfaced by a
-                # prioritised retrieval arm up the final ordering.
                 strategy_boosts = get_config().recall_strategy_boosts
-                if strategy_boosts:
-                    from .search.recall_boost import additive_strategy_boost
-
-                    for sr in scored_results:
-                        sr.weight += additive_strategy_boost(sr.candidate.source_ranks, strategy_boosts)
-                scored_results.sort(key=lambda x: x.weight, reverse=True)
+                scoring_kwargs = {
+                    "now": _recall_scoring_now(question_date),
+                    "is_passthrough_reranker": is_passthrough,
+                    "recency_decay_function": scoring_config.recency_decay_function,
+                    "recency_decay_linear_window_days": scoring_config.recency_decay_linear_window_days,
+                    "recency_decay_halflife_days": scoring_config.recency_decay_halflife_days,
+                    "strategy_boosts": strategy_boosts,
+                }
+                if len(scored_results) >= _RECALL_CPU_OFFLOAD_CANDIDATE_THRESHOLD:
+                    # Offload large combined scoring/sort to avoid event-loop starvation under high recall concurrency.
+                    await asyncio.to_thread(_apply_combined_scoring_and_sort, scored_results, **scoring_kwargs)
+                else:
+                    _apply_combined_scoring_and_sort(scored_results, **scoring_kwargs)
                 log_buffer.append("  [4.6] Combined scoring: ce * recency_boost(0.2) * temporal_boost(0.2)")
                 if strategy_boosts:
                     log_buffer.append(f"  [4.7] Strategy boosts applied: {strategy_boosts}")
@@ -4877,8 +5092,6 @@ class MemoryEngine(MemoryEngineInterface):
             total_chunk_tokens = 0
             chunk_fetch_start = time.time()
             if include_chunks and top_scored:
-                from .response_models import ChunkInfo
-
                 # Collect chunk_ids in order of fact relevance (preserving order from top_scored).
                 # Observations have no direct chunk_id — use a placeholder so their source
                 # chunks end up at the observation's rank position, not appended at the end.
@@ -4943,7 +5156,6 @@ class MemoryEngine(MemoryEngineInterface):
 
                 if chunk_ids_ordered:
                     chunks_dict = {}
-                    encoding = _get_tiktoken_encoding()
 
                     # Fetch all candidate chunks in a single query. Token-budget accounting
                     # happens in Python after the fetch — one round-trip is always faster
@@ -4958,31 +5170,20 @@ class MemoryEngine(MemoryEngineInterface):
                             chunk_ids_ordered,
                         )
 
-                    chunks_lookup = {row["chunk_id"]: row for row in chunks_rows}
-
-                    # Process chunks in relevance order, respecting token budget
-                    for chunk_id in chunk_ids_ordered:
-                        if chunk_id not in chunks_lookup:
-                            continue
-
-                        row = chunks_lookup[chunk_id]
-                        chunk_text = row["chunk_text"]
-                        chunk_tokens = len(encoding.encode(chunk_text))
-
-                        if total_chunk_tokens + chunk_tokens > max_chunk_tokens:
-                            remaining_tokens = max_chunk_tokens - total_chunk_tokens
-                            if remaining_tokens > 0:
-                                truncated_text = encoding.decode(encoding.encode(chunk_text)[:remaining_tokens])
-                                chunks_dict[chunk_id] = ChunkInfo(
-                                    chunk_text=truncated_text, chunk_index=row["chunk_index"], truncated=True
-                                )
-                                total_chunk_tokens = max_chunk_tokens
-                            break
-                        else:
-                            chunks_dict[chunk_id] = ChunkInfo(
-                                chunk_text=chunk_text, chunk_index=row["chunk_index"], truncated=False
-                            )
-                            total_chunk_tokens += chunk_tokens
+                    if _row_text_work_is_heavy(chunks_rows, "chunk_text"):
+                        # Offload bulk chunk token accounting to avoid event-loop starvation under high recall concurrency.
+                        chunks_dict, total_chunk_tokens = await asyncio.to_thread(
+                            _build_chunks_with_token_budget,
+                            chunk_ids_ordered,
+                            chunks_rows,
+                            max_chunk_tokens,
+                        )
+                    else:
+                        chunks_dict, total_chunk_tokens = _build_chunks_with_token_budget(
+                            chunk_ids_ordered,
+                            chunks_rows,
+                            max_chunk_tokens,
+                        )
 
             # Chunk fetch involves up to two SQL round-trips plus per-chunk tiktoken
             # encoding; record it only when chunks were actually requested (issue #2361).
@@ -4998,7 +5199,15 @@ class MemoryEngine(MemoryEngineInterface):
 
             # Convert to dict for token filtering (backward compatibility)
             top_dicts = [sr.to_dict() for sr in top_scored]
-            filtered_dicts, total_tokens = self._filter_by_token_budget(top_dicts, max_tokens)
+            if _token_budget_work_is_heavy(top_dicts):
+                # Offload bulk recall-result tokenization to avoid event-loop starvation under high recall concurrency.
+                filtered_dicts, total_tokens = await asyncio.to_thread(
+                    self._filter_by_token_budget,
+                    top_dicts,
+                    max_tokens,
+                )
+            else:
+                filtered_dicts, total_tokens = self._filter_by_token_budget(top_dicts, max_tokens)
 
             # Convert back to list of IDs and filter scored_results
             filtered_ids = {d["id"] for d in filtered_dicts}
@@ -5119,56 +5328,28 @@ class MemoryEngine(MemoryEngineInterface):
                                 """,
                                 [uuid_module.UUID(sid) for sid in source_ids_ordered],
                             )
-                            source_row_by_id = {str(r["id"]): r for r in source_rows}
-
-                            encoding = _get_tiktoken_encoding()
-                            source_facts_dict = {}
-
-                            def _make_source_fact(sid: str, r: Any) -> MemoryFact:
-                                return MemoryFact(
-                                    id=sid,
-                                    text=r["text"],
-                                    fact_type=r["fact_type"],
-                                    context=r["context"],
-                                    occurred_start=r["occurred_start"].isoformat() if r["occurred_start"] else None,
-                                    occurred_end=r["occurred_end"].isoformat() if r["occurred_end"] else None,
-                                    mentioned_at=r["mentioned_at"].isoformat() if r["mentioned_at"] else None,
-                                    document_id=r["document_id"],
-                                    metadata=r["metadata"],
-                                    chunk_id=str(r["chunk_id"]) if r["chunk_id"] else None,
-                                    tags=r["tags"] or None,
+                            if _source_fact_token_work_is_heavy(
+                                source_fact_ids_by_obs,
+                                source_ids_ordered,
+                                source_rows,
+                            ):
+                                # Offload bulk source-fact tokenization to avoid event-loop starvation under high recall concurrency.
+                                source_facts_dict = await asyncio.to_thread(
+                                    _build_source_facts_with_token_budget,
+                                    source_fact_ids_by_obs,
+                                    source_ids_ordered,
+                                    source_rows,
+                                    max_source_facts_tokens,
+                                    max_source_facts_tokens_per_observation,
                                 )
-
-                            if max_source_facts_tokens_per_observation >= 0:
-                                # Per-observation capping: each observation independently selects
-                                # source facts up to its token budget.
-                                for obs_id, sids in source_fact_ids_by_obs.items():
-                                    obs_tokens = 0
-                                    for sid in sids:
-                                        if sid not in source_row_by_id:
-                                            continue
-                                        r = source_row_by_id[sid]
-                                        fact_tokens = len(encoding.encode(r["text"]))
-                                        if obs_tokens + fact_tokens > max_source_facts_tokens_per_observation:
-                                            break
-                                        obs_tokens += fact_tokens
-                                        if sid not in source_facts_dict:
-                                            source_facts_dict[sid] = _make_source_fact(sid, r)
                             else:
-                                # Global budget: fill in order of first appearance until exhausted.
-                                total_source_tokens = 0
-                                for sid in source_ids_ordered:
-                                    if sid not in source_row_by_id:
-                                        continue
-                                    r = source_row_by_id[sid]
-                                    fact_tokens = len(encoding.encode(r["text"]))
-                                    if (
-                                        max_source_facts_tokens >= 0
-                                        and total_source_tokens + fact_tokens > max_source_facts_tokens
-                                    ):
-                                        break
-                                    source_facts_dict[sid] = _make_source_fact(sid, r)
-                                    total_source_tokens += fact_tokens
+                                source_facts_dict = _build_source_facts_with_token_budget(
+                                    source_fact_ids_by_obs,
+                                    source_ids_ordered,
+                                    source_rows,
+                                    max_source_facts_tokens,
+                                    max_source_facts_tokens_per_observation,
+                                )
 
             # Source-fact enrichment is two SQL passes + tiktoken encoding; record it
             # only when requested (issue #2361).
