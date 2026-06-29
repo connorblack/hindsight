@@ -1057,8 +1057,9 @@ async def _run_consolidation_job(
                             sub_results = pass_results
                         else:
                             for i, (existing, new) in enumerate(zip(sub_results, pass_results)):
+                                consume = existing.get("consume", True) and new.get("consume", True)
                                 if existing.get("action") == "skipped" and new.get("action") != "skipped":
-                                    sub_results[i] = new
+                                    sub_results[i] = dict(new)
                                 elif existing.get("action") != "skipped" and new.get("action") != "skipped":
                                     existing_created = existing.get(
                                         "created", 1 if existing.get("action") == "created" else 0
@@ -1076,6 +1077,10 @@ async def _run_consolidation_job(
                                         "merged": 0,
                                         "total_actions": total,
                                     }
+                                else:
+                                    sub_results[i] = dict(existing)
+                                if not consume:
+                                    sub_results[i]["consume"] = False
                 else:
                     sub_results, sub_deleted, sub_llm_failed = await _process_memory_batch(
                         pool=pool,
@@ -1105,7 +1110,9 @@ async def _run_consolidation_job(
                         f" {sub_batch[0]['id']}, marking consolidation_failed_at"
                     )
                 else:
-                    succeeded_ids.extend(m["id"] for m in sub_batch)
+                    succeeded_ids.extend(
+                        m["id"] for m, result in zip(sub_batch, sub_results) if result.get("consume", True)
+                    )
                     all_results.extend(sub_results)
 
             async with acquire_with_retry(pool) as conn:
@@ -1625,6 +1632,7 @@ async def _process_memory_batch(
     # Track which memory indices participated so we can build per-memory results for stats
     per_memory_created: set[str] = set()
     per_memory_updated: set[str] = set()
+    per_memory_unconsumed: set[str] = set()
 
     mem_by_id = {str(m["id"]): m for m in memories}
 
@@ -1682,12 +1690,16 @@ async def _process_memory_batch(
                 source_mentioned_at=agg.mentioned_at,
                 perf=perf,
             )
+        if updated_emb_str is None:
+            for m in source_mems:
+                per_memory_unconsumed.add(str(m["id"]))
+            continue
         for m in source_mems:
             per_memory_updated.add(str(m["id"]))
         # Reconcile the rewritten observation against its neighbours: the re-embed may have
         # drifted it into a near-twin of another existing observation (the residual-duplicate
         # source). updated_emb_str is None when the update was skipped — nothing to reconcile.
-        if dedup_enabled and updated_emb_str is not None:
+        if dedup_enabled:
             await _dedup_reconcile_update(
                 None,
                 memory_engine,
@@ -1781,14 +1793,20 @@ async def _process_memory_batch(
         mid = str(m["id"])
         created = mid in per_memory_created
         updated = mid in per_memory_updated
+        unconsumed = mid in per_memory_unconsumed
         if created and updated:
-            results.append({"action": "multiple", "created": 1, "updated": 1, "merged": 0, "total_actions": 2})
+            result = {"action": "multiple", "created": 1, "updated": 1, "merged": 0, "total_actions": 2}
         elif created:
-            results.append({"action": "created"})
+            result = {"action": "created"}
         elif updated:
-            results.append({"action": "updated"})
+            result = {"action": "updated"}
+        elif unconsumed:
+            result = {"action": "skipped", "reason": "update_not_applied"}
         else:
-            results.append({"action": "skipped", "reason": "no_durable_knowledge"})
+            result = {"action": "skipped", "reason": "no_durable_knowledge"}
+        if unconsumed:
+            result["consume"] = False
+        results.append(result)
 
     return results, deleted_count, llm_result.failed
 
@@ -1835,18 +1853,10 @@ async def _append_observation_history(
     history from growing without bound.
     """
     obs_uuid = uuid.UUID(observation_id)
-    # Guard the FK race: a concurrent consolidation worker can delete/merge this
-    # observation between the UPDATE above and this insert. observation_history's
-    # observation_id FK (-> memory_units ON DELETE CASCADE) would then raise and
-    # abort the whole consolidation transaction (acute at high worker concurrency).
-    # Insert only if the observation still exists — there is nothing to snapshot for
-    # a row that has vanished. The UPDATE above locks the row when it matched, so
-    # this closes the window rather than merely narrowing it.
     await conn.execute(
         f"""
         INSERT INTO {fq_table("observation_history")} (observation_id, bank_id, content, changed_at)
-        SELECT $1, $2, $3::jsonb, now()
-        WHERE EXISTS (SELECT 1 FROM {fq_table("memory_units")} WHERE id = $1)
+        VALUES ($1, $2, $3::jsonb, now())
         """,
         obs_uuid,
         bank_id,
@@ -1933,56 +1943,70 @@ async def _execute_update_action(
     config = get_config()
 
     t0 = time.time()
-    await conn.execute(
-        f"""
-        UPDATE {fq_table("memory_units")}
-        SET text = $1,
-            embedding = $2::vector,
-            source_memory_ids = $3,
-            proof_count = $4,
-            tags = $9,
-            updated_at = now(),
-            occurred_start = LEAST(occurred_start, COALESCE($6, occurred_start)),
-            occurred_end = GREATEST(occurred_end, COALESCE($7, occurred_end)),
-            mentioned_at = GREATEST(mentioned_at, COALESCE($8, mentioned_at))
-        WHERE id = $5
-        """,
-        new_text,
-        embedding_str,
-        source_ids,
-        len(source_ids),
-        uuid.UUID(observation_id),
-        source_occurred_start,
-        source_occurred_end,
-        source_mentioned_at,
-        merged_tags,
-    )
-
-    # Record the pre-update snapshot in the dedicated observation_history table
-    # (one row per change), then trim to the configured cap. History lived in a
-    # single unbounded JSONB column before; an often-reinforced observation grew
-    # it until it crossed Postgres's 256MB jsonb limit and got stuck.
-    if config.enable_observation_history:
-        await _append_observation_history(
-            conn, bank_id, observation_id, history_entry, config.observation_history_max_entries
+    # Keep the UPDATE row lock until dependent FK writes finish. Under READ COMMITTED,
+    # a standalone EXISTS guard can still race a concurrent delete between the parent
+    # check and the child FK check; the locked UPDATE row cannot be deleted until this
+    # short transaction exits.
+    async with conn.transaction():
+        status = await conn.execute(
+            f"""
+            UPDATE {fq_table("memory_units")}
+            SET text = $1,
+                embedding = $2::vector,
+                source_memory_ids = $3,
+                proof_count = $4,
+                tags = $9,
+                updated_at = now(),
+                occurred_start = LEAST(occurred_start, COALESCE($6, occurred_start)),
+                occurred_end = GREATEST(occurred_end, COALESCE($7, occurred_end)),
+                mentioned_at = GREATEST(mentioned_at, COALESCE($8, mentioned_at))
+            WHERE id = $5
+            """,
+            new_text,
+            embedding_str,
+            source_ids,
+            len(source_ids),
+            uuid.UUID(observation_id),
+            source_occurred_start,
+            source_occurred_end,
+            source_mentioned_at,
+            merged_tags,
         )
+        try:
+            updated_count = int(status.strip().rsplit(" ", 1)[-1])
+        except (IndexError, ValueError):
+            updated_count = 1
+        if updated_count == 0:
+            if perf:
+                perf.record_timing("db_write", time.time() - t0)
+            logger.debug(f"Update skipped: observation {observation_id} vanished before the update applied")
+            return None
 
-    # Sync observation_sources junction table (Oracle only — PG uses native array ops).
-    if memory_engine._backend.ops.uses_observation_sources_table:
-        obs_uuid = uuid.UUID(observation_id)
-        await conn.execute(
-            f"DELETE FROM {fq_table('observation_sources')} WHERE observation_id = $1",
-            obs_uuid,
-        )
-        if source_ids:
-            await conn.executemany(
-                f"""
-                INSERT INTO {fq_table("observation_sources")} (observation_id, source_id)
-                VALUES ($1, $2)
-                ON CONFLICT (observation_id, source_id) DO NOTHING
-                """,
-                [(obs_uuid, sid) for sid in dict.fromkeys(source_ids)],
+        # Record the pre-update snapshot in the dedicated observation_history table
+        # (one row per change), then trim to the configured cap. History lived in a
+        # single unbounded JSONB column before; an often-reinforced observation grew
+        # it until it crossed Postgres's 256MB jsonb limit and got stuck.
+        if config.enable_observation_history:
+            await _append_observation_history(
+                conn, bank_id, observation_id, history_entry, config.observation_history_max_entries
             )
+
+        # Sync observation_sources junction table (Oracle only — PG uses native array ops).
+        if memory_engine._backend.ops.uses_observation_sources_table:
+            obs_uuid = uuid.UUID(observation_id)
+            await conn.execute(
+                f"DELETE FROM {fq_table('observation_sources')} WHERE observation_id = $1",
+                obs_uuid,
+            )
+            if source_ids:
+                await conn.executemany(
+                    f"""
+                    INSERT INTO {fq_table("observation_sources")} (observation_id, source_id)
+                    VALUES ($1, $2)
+                    ON CONFLICT (observation_id, source_id) DO NOTHING
+                    """,
+                    [(obs_uuid, sid) for sid in dict.fromkeys(source_ids)],
+                )
 
     if perf:
         perf.record_timing("db_write", time.time() - t0)
