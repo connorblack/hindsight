@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import uuid
 from datetime import UTC, datetime, timedelta
+from types import SimpleNamespace
 
 import pytest
 
@@ -137,6 +138,94 @@ async def _queue_unit_ids(conn, bank_id: str) -> list[str]:
         bank_id,
     )
     return [str(r["unit_id"]) for r in rows]
+
+
+class _RecordingGraphTransaction:
+    def __init__(self, conn):
+        self.conn = conn
+
+    async def __aenter__(self):
+        self.conn.events.append(("tx_begin", self.conn.name))
+
+    async def __aexit__(self, exc_type, exc, tb):
+        self.conn.events.append(("tx_rollback", self.conn.name) if exc_type else ("tx_commit", self.conn.name))
+        return False
+
+
+class _RecordingGraphConn:
+    def __init__(self, name: str, events: list[tuple[str, str]]):
+        self.name = name
+        self.events = events
+
+    def transaction(self):
+        return _RecordingGraphTransaction(self)
+
+
+class _RecordingGraphAcquire:
+    def __init__(self, name: str, events: list[tuple[str, str]]):
+        self.conn = _RecordingGraphConn(name, events)
+        self.events = events
+
+    async def __aenter__(self):
+        self.events.append(("acquire_enter", self.conn.name))
+        return self.conn
+
+    async def __aexit__(self, exc_type, exc, tb):
+        self.events.append(("acquire_rollback", self.conn.name) if exc_type else ("acquire_commit", self.conn.name))
+        return False
+
+
+class _FailingStaleSweepOps:
+    def __init__(self, events: list[tuple[str, str]]):
+        self.events = events
+
+    async def claim_graph_maintenance_batch(self, conn, *args):
+        self.events.append(("claim", conn.name))
+        return []
+
+    async def prune_orphan_entities(self, conn, *args):
+        self.events.append(("orphan", conn.name))
+        return 1
+
+    async def prune_stale_cooccurrences(self, conn, *args):
+        self.events.append(("stale", conn.name))
+        raise TimeoutError("stale cooccurrence prune timed out")
+
+
+class _FakeGraphMaintenanceMemory:
+    def __init__(self, ops):
+        self._backend = SimpleNamespace(ops=ops)
+
+    async def _get_backend(self):
+        return self._backend
+
+
+@pytest.mark.asyncio
+async def test_orphan_prune_acquire_commits_before_stale_prune_failure(monkeypatch):
+    from hindsight_api.engine import memory_engine as memory_engine_module
+
+    events: list[tuple[str, str]] = []
+    acquire_count = 0
+
+    def fake_acquire_with_retry(backend):
+        nonlocal acquire_count
+        acquire_count += 1
+        return _RecordingGraphAcquire(f"conn-{acquire_count}", events)
+
+    monkeypatch.setattr(memory_engine_module, "acquire_with_retry", fake_acquire_with_retry)
+
+    with pytest.raises(TimeoutError, match="stale cooccurrence prune timed out"):
+        await run_graph_maintenance_job(
+            _FakeGraphMaintenanceMemory(_FailingStaleSweepOps(events)),
+            "test-bank",
+            request_context=object(),
+        )
+
+    assert ("orphan", "conn-2") in events
+    assert ("acquire_commit", "conn-2") in events
+    assert ("stale", "conn-3") in events
+    assert events.index(("acquire_commit", "conn-2")) < events.index(("stale", "conn-3"))
+    assert ("acquire_rollback", "conn-3") in events
 
 
 # ---------------------------------------------------------------------------

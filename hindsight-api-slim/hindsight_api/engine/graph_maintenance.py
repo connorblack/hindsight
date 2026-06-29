@@ -205,11 +205,10 @@ async def run_graph_maintenance_job(
     # Bank-wide single-statement deletes. Cheap when there's nothing to do.
     from .memory_engine import acquire_with_retry
 
+    # Separate acquire scopes: on Oracle, conn.transaction() is a savepoint and the
+    # connection commits when acquire exits. Let Pass2 commit before Pass3 begins so
+    # a slow/failed stale sweep cannot roll back a good orphan prune.
     async with acquire_with_retry(backend) as conn:
-        # Separate transactions: the orphan prune is cheap and high-value (it also cascades
-        # cooccurrences via FK), so commit it on its own. The cooccurrence stale-sweep is the
-        # heavier pass — keeping it in its own transaction means a slow/failed sweep can never
-        # roll back a good orphan prune.
         async with conn.transaction():
             result.orphan_entities_pruned = await ops.prune_orphan_entities(
                 conn,
@@ -217,9 +216,11 @@ async def run_graph_maintenance_job(
                 fq_table("unit_entities"),
                 bank_id,
             )
-        # The orphan prune above cascades cooccurrences via FK. The explicit cooccurrence pass
-        # below catches the *stale-count* case: both entities still exist but no current unit
-        # witnesses them together.
+
+    # The orphan prune above cascades cooccurrences via FK. The explicit cooccurrence pass
+    # below catches the *stale-count* case: both entities still exist but no current unit
+    # witnesses them together.
+    async with acquire_with_retry(backend) as conn:
         async with conn.transaction():
             result.stale_cooccurrences_pruned = await ops.prune_stale_cooccurrences(
                 conn,
