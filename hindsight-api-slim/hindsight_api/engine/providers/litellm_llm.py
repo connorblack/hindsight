@@ -22,8 +22,9 @@ from typing import Any
 from litellm.exceptions import Timeout as LiteLLMTimeout
 
 from hindsight_api.config import DEFAULT_LLM_TIMEOUT, ENV_LLM_TIMEOUT
-from hindsight_api.engine.llm_interface import LLMInterface, OutputTooLongError
+from hindsight_api.engine.llm_interface import ContextLengthExceededError, LLMInterface, OutputTooLongError
 from hindsight_api.engine.llm_trace import LLMResponseUsage, stash_response_usage
+from hindsight_api.engine.providers.openai_compatible_llm import is_context_length_error
 from hindsight_api.engine.response_models import LLMToolCall, LLMToolCallResult, TokenUsage
 from hindsight_api.metrics import get_metrics_collector
 from hindsight_api.worker.stage import set_stage
@@ -355,6 +356,10 @@ class LiteLLMLLM(LLMInterface):
                 raise
 
             except Exception as e:
+                if is_context_length_error(e):
+                    logger.error(f"LiteLLM context length error, not retrying: {e}")
+                    raise ContextLengthExceededError(str(e)) from e
+
                 error_str = str(e).lower()
                 # Fast fail on auth errors
                 if "401" in error_str or "403" in error_str or "unauthorized" in error_str:
@@ -495,6 +500,10 @@ class LiteLLMLLM(LLMInterface):
                 raise
 
             except Exception as e:
+                if is_context_length_error(e):
+                    logger.error(f"LiteLLM tool-call context length error, not retrying: {e}")
+                    raise ContextLengthExceededError(str(e)) from e
+
                 error_str = str(e).lower()
                 if "401" in error_str or "403" in error_str or "unauthorized" in error_str:
                     raise

@@ -30,9 +30,10 @@ from typing import TYPE_CHECKING, Any, Literal
 
 from pydantic import BaseModel, field_validator
 
-from ...config import get_config
+from ...config import DEFAULT_CONSOLIDATION_MAX_INPUT_TOKENS, get_config
 from ...worker.stage import set_stage
 from ..db_utils import acquire_with_retry
+from ..llm_interface import ContextLengthExceededError
 from ..llm_trace import (
     record_created_memory_ids,
     record_source_memory_ids,
@@ -41,7 +42,7 @@ from ..llm_trace import (
     trace_context_of,
 )
 from ..llm_wrapper import sanitize_llm_output
-from ..memory_engine import Budget, fq_table
+from ..memory_engine import Budget, _get_tiktoken_encoding, fq_table
 from ..retain import embedding_utils
 from .prompts import (
     build_consolidation_input,
@@ -686,6 +687,47 @@ def _build_response_model(max_creates: int | None = None) -> type[_Consolidation
         creates: list[_CreateAction] = PydanticField(default=[], max_length=clamped)
 
     return _ConstrainedConsolidationBatchResponse
+
+
+def _build_consolidation_response_contract(max_creates: int | None = None) -> str:
+    """Return the prompt-side JSON contract for consolidation decisions."""
+    if max_creates is not None and max_creates >= 0:
+        create_cap = f"The creates array must contain no more than {max_creates} item(s)."
+    else:
+        create_cap = "The creates array may contain any number of items."
+
+    return f"""
+
+## RESPONSE JSON CONTRACT
+
+Respond with ONLY a JSON object of this exact shape.
+Do not include markdown fences, prose, comments, or any keys not shown here.
+All three top-level arrays are required; use an empty array when there are no actions of that type.
+{create_cap}
+
+{{
+  "creates": [
+    {{
+      "text": "observation prose",
+      "source_fact_ids": ["source-fact-uuid"],
+      "reason": "one sentence explaining the decision"
+    }}
+  ],
+  "updates": [
+    {{
+      "text": "updated observation prose",
+      "observation_id": "existing-observation-uuid",
+      "source_fact_ids": ["source-fact-uuid"],
+      "reason": "one sentence explaining the decision"
+    }}
+  ],
+  "deletes": [
+    {{
+      "observation_id": "existing-observation-uuid",
+      "reason": "one sentence explaining the decision"
+    }}
+  ]
+}}"""
 
 
 class ConsolidationPerfLog:
@@ -2206,6 +2248,238 @@ def _build_observations_for_llm(
     return obs_list
 
 
+@dataclass
+class _PromptCompactionStats:
+    original_tokens: int = 0
+    final_tokens: int = 0
+    target_tokens: int = 0
+    observations_original: int = 0
+    observations_dropped: int = 0
+    source_contexts_removed: int = 0
+    source_memories_removed: int = 0
+    source_texts_truncated: int = 0
+    observation_texts_truncated: int = 0
+
+
+@dataclass
+class _PreparedConsolidationPrompt:
+    user_content: str
+    prompt_tokens: int
+    failed: bool = False
+    stats: _PromptCompactionStats = field(default_factory=_PromptCompactionStats)
+
+
+def _consolidation_input_target_tokens(config: Any) -> int:
+    max_input_tokens = getattr(config, "consolidation_max_input_tokens", None)
+    if not isinstance(max_input_tokens, int) or max_input_tokens <= 0:
+        max_input_tokens = DEFAULT_CONSOLIDATION_MAX_INPUT_TOKENS
+    completion_reserve = getattr(config, "consolidation_max_completion_tokens", None)
+    if not isinstance(completion_reserve, int) or completion_reserve <= 0:
+        completion_reserve = 0
+    # vLLM-style gateways can reject when prompt + requested output exceeds the context window.
+    # Subtract the configured completion budget before compacting the input side.
+    return max(1, max_input_tokens - completion_reserve)
+
+
+def _render_observations_text(obs_list: list[dict[str, Any]], *, compact: bool) -> str:
+    if not obs_list:
+        return "[]"
+    if compact:
+        return json.dumps(obs_list, ensure_ascii=False, separators=(",", ":"))
+    return json.dumps(obs_list, indent=2, ensure_ascii=False)
+
+
+def _render_consolidation_user_content(
+    *,
+    facts_lines: str,
+    obs_list: list[dict[str, Any]],
+    compact_observation_json: bool,
+    observations_mission: str | None,
+    observation_capacity_note: str | None,
+    max_creates: int | None,
+) -> str:
+    user_content = build_consolidation_input(
+        facts_text=facts_lines,
+        observations_text=_render_observations_text(obs_list, compact=compact_observation_json),
+        observations_mission=observations_mission,
+        observation_capacity_note=observation_capacity_note,
+    )
+    return user_content + _build_consolidation_response_contract(max_creates=max_creates)
+
+
+def _rendered_prompt_tokens(encoding: Any, *, system_prompt: str, user_content: str) -> int:
+    return len(encoding.encode(system_prompt)) + len(encoding.encode(user_content))
+
+
+def _truncate_to_token_cap(text: str, *, max_tokens: int, encoding: Any) -> str:
+    tokens = encoding.encode(text)
+    if len(tokens) <= max_tokens:
+        return text
+    return encoding.decode(tokens[:max_tokens]).rstrip() + "..."
+
+
+def _remove_source_contexts(obs_list: list[dict[str, Any]]) -> int:
+    removed = 0
+    for obs in obs_list:
+        for source_memory in obs.get("source_memories") or []:
+            if isinstance(source_memory, dict) and "context" in source_memory:
+                source_memory.pop("context", None)
+                removed += 1
+    return removed
+
+
+def _truncate_source_memory_texts(
+    obs_list: list[dict[str, Any]],
+    *,
+    encoding: Any,
+    max_tokens: int = 128,
+) -> int:
+    truncated = 0
+    for obs in obs_list:
+        for source_memory in obs.get("source_memories") or []:
+            if not isinstance(source_memory, dict):
+                continue
+            text = source_memory.get("text")
+            if not isinstance(text, str):
+                continue
+            capped = _truncate_to_token_cap(text, max_tokens=max_tokens, encoding=encoding)
+            if capped != text:
+                source_memory["text"] = capped
+                truncated += 1
+    return truncated
+
+
+def _remove_lower_ranked_source_memories(obs_list: list[dict[str, Any]]) -> int:
+    removed = 0
+    for obs in reversed(obs_list[1:]):
+        source_memories = obs.pop("source_memories", None)
+        if isinstance(source_memories, list):
+            removed += len(source_memories)
+    return removed
+
+
+def _truncate_observation_texts(
+    obs_list: list[dict[str, Any]],
+    *,
+    encoding: Any,
+    max_tokens: int = 128,
+) -> int:
+    truncated = 0
+    for obs in obs_list:
+        text = obs.get("text")
+        if not isinstance(text, str):
+            continue
+        capped = _truncate_to_token_cap(text, max_tokens=max_tokens, encoding=encoding)
+        if capped != text:
+            obs["text"] = capped
+            truncated += 1
+    return truncated
+
+
+def _prepare_consolidation_prompt(
+    *,
+    system_prompt: str,
+    facts_lines: str,
+    obs_list: list[dict[str, Any]],
+    config: Any,
+    observation_capacity_note: str | None,
+    remaining_observation_slots: int | None,
+) -> _PreparedConsolidationPrompt:
+    encoding = _get_tiktoken_encoding()
+    target_tokens = _consolidation_input_target_tokens(config)
+    stats = _PromptCompactionStats(target_tokens=target_tokens, observations_original=len(obs_list))
+
+    compact_json = False
+    user_content = _render_consolidation_user_content(
+        facts_lines=facts_lines,
+        obs_list=obs_list,
+        compact_observation_json=compact_json,
+        observations_mission=config.observations_mission,
+        observation_capacity_note=observation_capacity_note,
+        max_creates=remaining_observation_slots,
+    )
+    prompt_tokens = _rendered_prompt_tokens(encoding, system_prompt=system_prompt, user_content=user_content)
+    stats.original_tokens = prompt_tokens
+    if prompt_tokens <= target_tokens:
+        stats.final_tokens = prompt_tokens
+        return _PreparedConsolidationPrompt(user_content=user_content, prompt_tokens=prompt_tokens, stats=stats)
+
+    def rebuild() -> int:
+        nonlocal user_content
+        user_content = _render_consolidation_user_content(
+            facts_lines=facts_lines,
+            obs_list=obs_list,
+            compact_observation_json=compact_json,
+            observations_mission=config.observations_mission,
+            observation_capacity_note=observation_capacity_note,
+            max_creates=remaining_observation_slots,
+        )
+        return _rendered_prompt_tokens(encoding, system_prompt=system_prompt, user_content=user_content)
+
+    compact_json = True
+    prompt_tokens = rebuild()
+    if prompt_tokens > target_tokens:
+        stats.source_contexts_removed += _remove_source_contexts(obs_list)
+        prompt_tokens = rebuild()
+    if prompt_tokens > target_tokens:
+        stats.source_texts_truncated += _truncate_source_memory_texts(obs_list, encoding=encoding)
+        prompt_tokens = rebuild()
+    if prompt_tokens > target_tokens:
+        stats.source_memories_removed += _remove_lower_ranked_source_memories(obs_list)
+        prompt_tokens = rebuild()
+    if prompt_tokens > target_tokens:
+        # Data-loss guard: a cap-saturated scope still needs one merge target so the LLM can UPDATE.
+        min_observations = 1 if remaining_observation_slots == 0 and obs_list else 0
+        while len(obs_list) > min_observations and prompt_tokens > target_tokens:
+            obs_list.pop()
+            stats.observations_dropped += 1
+            prompt_tokens = rebuild()
+    if prompt_tokens > target_tokens:
+        stats.observation_texts_truncated += _truncate_observation_texts(obs_list, encoding=encoding)
+        prompt_tokens = rebuild()
+
+    stats.final_tokens = prompt_tokens
+    if prompt_tokens <= target_tokens:
+        logger.info(
+            "[CONSOLIDATION] Compacted LLM prompt tokens %d -> %d (target=%d, observations_kept=%d/%d, "
+            "observations_dropped=%d, source_contexts_removed=%d, source_memories_removed=%d, "
+            "source_texts_truncated=%d, observation_texts_truncated=%d)",
+            stats.original_tokens,
+            stats.final_tokens,
+            stats.target_tokens,
+            len(obs_list),
+            stats.observations_original,
+            stats.observations_dropped,
+            stats.source_contexts_removed,
+            stats.source_memories_removed,
+            stats.source_texts_truncated,
+            stats.observation_texts_truncated,
+        )
+        return _PreparedConsolidationPrompt(user_content=user_content, prompt_tokens=prompt_tokens, stats=stats)
+
+    logger.warning(
+        "[CONSOLIDATION] Prompt exceeds input token cap after compaction (%d -> %d, target=%d, "
+        "observations_kept=%d/%d, observations_dropped=%d, source_contexts_removed=%d, "
+        "source_memories_removed=%d, source_texts_truncated=%d, observation_texts_truncated=%d); failing batch",
+        stats.original_tokens,
+        stats.final_tokens,
+        stats.target_tokens,
+        len(obs_list),
+        stats.observations_original,
+        stats.observations_dropped,
+        stats.source_contexts_removed,
+        stats.source_memories_removed,
+        stats.source_texts_truncated,
+        stats.observation_texts_truncated,
+    )
+    return _PreparedConsolidationPrompt(
+        user_content=user_content,
+        prompt_tokens=prompt_tokens,
+        failed=True,
+        stats=stats,
+    )
+
+
 def _dedupe_updates(updates: list[_UpdateAction], *, batch_label: str) -> list[_UpdateAction]:
     """Collapse `updates` that target the same `observation_id`.
 
@@ -2256,11 +2530,7 @@ async def _consolidate_batch_with_llm(
     """Single LLM call for a batch of facts against a pooled set of observations."""
     if config is None:
         raise ValueError("config is required for _consolidate_batch_with_llm")
-    if union_observations:
-        obs_list = _build_observations_for_llm(union_observations, union_source_facts)
-        observations_text = json.dumps(obs_list, indent=2, ensure_ascii=False)
-    else:
-        observations_text = "[]"
+    obs_list = _build_observations_for_llm(union_observations, union_source_facts) if union_observations else []
 
     def _fact_line(m: dict[str, Any]) -> str:
         text = f"[{m['id']}] {m['text']}"
@@ -2302,12 +2572,21 @@ async def _consolidate_batch_with_llm(
     system_prompt = build_consolidation_system_prompt(
         llm_output_language=getattr(config, "llm_output_language", None),
     )
-    user_content = build_consolidation_input(
-        facts_text=facts_lines,
-        observations_text=observations_text,
-        observations_mission=config.observations_mission,
+    prepared_prompt = _prepare_consolidation_prompt(
+        system_prompt=system_prompt,
+        facts_lines=facts_lines,
+        obs_list=obs_list,
+        config=config,
         observation_capacity_note=observation_capacity_note,
+        remaining_observation_slots=remaining_observation_slots,
     )
+    user_content = prepared_prompt.user_content
+    if prepared_prompt.failed:
+        return _BatchLLMResult(
+            obs_count=len(union_observations),
+            prompt_chars=len(system_prompt) + len(user_content),
+            failed=True,
+        )
 
     # Opt into context caching of the stable system prefix when the provider
     # supports it (gemini/vertexai with the flag on). response_schema is NOT
@@ -2377,6 +2656,16 @@ async def _consolidate_batch_with_llm(
                 deletes=response.deletes,
                 obs_count=len(union_observations),
                 prompt_chars=len(system_prompt) + len(user_content),
+            )
+        except ContextLengthExceededError as exc:
+            logger.warning(
+                f"[CONSOLIDATION] LLM batch context length exceeded for {batch_label}; "
+                f"failing batch without retry: {exc}"
+            )
+            return _BatchLLMResult(
+                obs_count=len(union_observations),
+                prompt_chars=len(system_prompt) + len(user_content),
+                failed=True,
             )
         except Exception as exc:
             last_exc = exc

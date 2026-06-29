@@ -484,6 +484,7 @@ ENV_CONSOLIDATION_DEDUP_THRESHOLD = "HINDSIGHT_API_CONSOLIDATION_DEDUP_THRESHOLD
 ENV_CONSOLIDATION_LLM_PARALLELISM = "HINDSIGHT_API_CONSOLIDATION_LLM_PARALLELISM"
 ENV_CONSOLIDATION_MAX_TOKENS = "HINDSIGHT_API_CONSOLIDATION_MAX_TOKENS"
 ENV_CONSOLIDATION_MAX_COMPLETION_TOKENS = "HINDSIGHT_API_CONSOLIDATION_MAX_COMPLETION_TOKENS"
+ENV_CONSOLIDATION_MAX_INPUT_TOKENS = "HINDSIGHT_API_CONSOLIDATION_MAX_INPUT_TOKENS"
 ENV_CONSOLIDATION_SOURCE_FACTS_MAX_TOKENS = "HINDSIGHT_API_CONSOLIDATION_SOURCE_FACTS_MAX_TOKENS"
 ENV_CONSOLIDATION_SOURCE_FACTS_MAX_TOKENS_PER_OBSERVATION = (
     "HINDSIGHT_API_CONSOLIDATION_SOURCE_FACTS_MAX_TOKENS_PER_OBSERVATION"
@@ -956,6 +957,7 @@ DEFAULT_CONSOLIDATION_MAX_TOKENS = 512  # Max tokens for recall when finding rel
 # budget — 100% backwards compatible. Operators on providers with a low hidden default (notably Bedrock imported
 # models, which cap at 4096 and truncate structured consolidation JSON) set this explicitly to fix #1939.
 DEFAULT_CONSOLIDATION_MAX_COMPLETION_TOKENS = None
+DEFAULT_CONSOLIDATION_MAX_INPUT_TOKENS = 32000
 DEFAULT_CONSOLIDATION_RECALL_BUDGET = "low"  # Budget level for consolidation recall (low/mid/high)
 DEFAULT_CONSOLIDATION_SOURCE_FACTS_MAX_TOKENS = (
     4096  # Total token budget for source facts in consolidation recall (-1 = unlimited)
@@ -1767,6 +1769,7 @@ class HindsightConfig:
     consolidation_llm_parallelism: int
     consolidation_max_tokens: int
     consolidation_max_completion_tokens: int | None
+    consolidation_max_input_tokens: int
     consolidation_recall_budget: str
     consolidation_source_facts_max_tokens: int
     consolidation_source_facts_max_tokens_per_observation: int
@@ -2794,6 +2797,10 @@ class HindsightConfig:
                 int(os.getenv(ENV_CONSOLIDATION_MAX_COMPLETION_TOKENS))
                 if os.getenv(ENV_CONSOLIDATION_MAX_COMPLETION_TOKENS)
                 else DEFAULT_CONSOLIDATION_MAX_COMPLETION_TOKENS
+            ),
+            consolidation_max_input_tokens=max(
+                1,
+                int(os.getenv(ENV_CONSOLIDATION_MAX_INPUT_TOKENS, str(DEFAULT_CONSOLIDATION_MAX_INPUT_TOKENS))),
             ),
             consolidation_recall_budget=os.getenv(ENV_CONSOLIDATION_RECALL_BUDGET, DEFAULT_CONSOLIDATION_RECALL_BUDGET),
             consolidation_source_facts_max_tokens=int(

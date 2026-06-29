@@ -255,6 +255,12 @@ class OutputTooLongError(Exception):
     pass
 
 
+class ContextLengthExceededError(Exception):
+    """Raised when a provider rejects a request because the prompt exceeds its context window."""
+
+    pass
+
+
 class ProviderRateLimitResetError(Exception):
     """Raised when an upstream provider says quota will reopen at a known time."""
 

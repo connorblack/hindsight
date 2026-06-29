@@ -36,7 +36,12 @@ from openai import APIConnectionError, APIStatusError, AsyncOpenAI, LengthFinish
 
 from hindsight_api.config import DEFAULT_LLM_TIMEOUT, ENV_LLM_TIMEOUT
 from hindsight_api.engine.bank_attribution import apply_bank_attribution
-from hindsight_api.engine.llm_interface import LLMInterface, OutputTooLongError, ProviderRateLimitResetError
+from hindsight_api.engine.llm_interface import (
+    ContextLengthExceededError,
+    LLMInterface,
+    OutputTooLongError,
+    ProviderRateLimitResetError,
+)
 from hindsight_api.engine.llm_trace import LLMResponseUsage, stash_response_usage
 from hindsight_api.engine.response_models import LLMToolCall, LLMToolCallResult, TokenUsage
 from hindsight_api.metrics import get_metrics_collector
@@ -319,6 +324,76 @@ def _status_error_body_text(e: APIStatusError) -> str:
         except Exception:
             return str(body)
     return str(body or "").strip()
+
+
+_CONTEXT_LENGTH_ERROR_CODES = frozenset(
+    {
+        "context_length_exceeded",
+        "context_window_exceeded",
+        "input_too_long",
+        "prompt_too_long",
+    }
+)
+_CONTEXT_LENGTH_MESSAGE_PHRASES = (
+    "maximum context length",
+    "context length exceeded",
+    "context window exceeded",
+    "prompt exceeds max length",
+    "prompt is too long",
+    "input is too long",
+    "reduce the length of the messages",
+)
+
+
+def _status_error_payloads(body: Any) -> list[dict[str, Any]]:
+    if not isinstance(body, dict):
+        return []
+    payloads = [body]
+    nested = body.get("error")
+    if isinstance(nested, dict):
+        payloads.append(nested)
+    return payloads
+
+
+def is_context_length_error(e: Any) -> bool:
+    """Return True only for HTTP 400 provider errors that clearly mean input context overflow."""
+    raw_status_code = getattr(e, "status_code", None) or getattr(getattr(e, "response", None), "status_code", None)
+    try:
+        status_code = int(raw_status_code)
+    except (TypeError, ValueError):
+        return False
+    if status_code != 400:
+        return False
+
+    body = getattr(e, "body", None)
+    message_parts: list[str] = []
+    for payload in _status_error_payloads(body):
+        for field_name in ("code", "type"):
+            field_value = payload.get(field_name)
+            if isinstance(field_value, str) and field_value.lower() in _CONTEXT_LENGTH_ERROR_CODES:
+                return True
+        for field_name in ("message", "error"):
+            field_value = payload.get(field_name)
+            if isinstance(field_value, str):
+                message_parts.append(field_value)
+
+    body_text = _status_error_body_text(e)
+    if body_text:
+        message_parts.append(body_text)
+    exception_text = str(e)
+    if exception_text:
+        message_parts.append(exception_text)
+
+    combined = "\n".join(message_parts).lower()
+    if any(code in combined for code in _CONTEXT_LENGTH_ERROR_CODES):
+        return True
+    if any(phrase in combined for phrase in _CONTEXT_LENGTH_MESSAGE_PHRASES):
+        return True
+    return (
+        "vllmvalidationerror" in combined
+        and ("context" in combined or "prompt" in combined)
+        and ("token" in combined or "length" in combined)
+    )
 
 
 def _parse_retry_after_header(value: str | None, now: datetime) -> datetime | None:
@@ -963,6 +1038,12 @@ class OpenAICompatibleLLM(LLMInterface):
                 if e.status_code in (401, 403):
                     logger.error(f"Auth error (HTTP {e.status_code}), not retrying: {str(e)}")
                     raise
+                if is_context_length_error(e):
+                    summary = _summarize_status_error(e)
+                    logger.error(
+                        f"Context length error ({self.provider}/{self.model}, scope={scope}), not retrying: {summary}"
+                    )
+                    raise ContextLengthExceededError(summary) from e
 
                 _raise_provider_quota_defer(
                     e, provider=self.provider, model=self.model, scope=scope, max_backoff=max_backoff
@@ -1266,6 +1347,13 @@ class OpenAICompatibleLLM(LLMInterface):
                         f"not retrying: {_summarize_status_error(e)}"
                     )
                     raise
+                if is_context_length_error(e):
+                    summary = _summarize_status_error(e)
+                    logger.error(
+                        f"Context length error in tool call ({self.provider}/{self.model}, scope={scope}), "
+                        f"not retrying: {summary}"
+                    )
+                    raise ContextLengthExceededError(summary) from e
                 _raise_provider_quota_defer(
                     e, provider=self.provider, model=self.model, scope=scope, max_backoff=max_backoff
                 )
