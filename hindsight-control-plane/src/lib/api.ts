@@ -193,6 +193,7 @@ export interface MentalModel {
     exclude_mental_model_ids?: string[];
     tags_match?: TagsMatch;
     tag_groups?: TagGroup[];
+    rolling_months?: number;
     include_chunks?: boolean;
     recall_max_tokens?: number;
     recall_chunks_max_tokens?: number;
@@ -1244,6 +1245,7 @@ export class ControlPlaneClient {
           exclude_mental_model_ids?: string[];
           tags_match?: TagsMatch;
           tag_groups?: TagGroup[];
+          rolling_months?: number;
           include_chunks?: boolean;
           recall_max_tokens?: number;
           recall_chunks_max_tokens?: number;
@@ -1279,6 +1281,7 @@ export class ControlPlaneClient {
         exclude_mental_model_ids?: string[];
         tags_match?: TagsMatch;
         tag_groups?: TagGroup[];
+        rolling_months?: number;
         include_chunks?: boolean;
         recall_max_tokens?: number;
         recall_chunks_max_tokens?: number;
@@ -1322,6 +1325,7 @@ export class ControlPlaneClient {
         exclude_mental_model_ids?: string[];
         tags_match?: TagsMatch;
         tag_groups?: TagGroup[];
+        rolling_months?: number;
         include_chunks?: boolean;
         recall_max_tokens?: number;
         recall_chunks_max_tokens?: number;
@@ -1344,6 +1348,7 @@ export class ControlPlaneClient {
         exclude_mental_model_ids?: string[];
         tags_match?: TagsMatch;
         tag_groups?: TagGroup[];
+        rolling_months?: number;
         include_chunks?: boolean;
         recall_max_tokens?: number;
         recall_chunks_max_tokens?: number;

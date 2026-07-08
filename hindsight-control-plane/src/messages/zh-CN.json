@@ -829,7 +829,9 @@
     "clearDialogConfirm": "清除",
     "actionClearContent": "清除内容",
     "emptyContent": "暂无内容。刷新此心智模型以生成内容。",
-    "selectModelPrompt": "选择一个心智模型以查看其内容。"
+    "selectModelPrompt": "选择一个心智模型以查看其内容。",
+    "optionsRollingMonthsLabel": "Rolling window (months)",
+    "optionsRollingMonthsDescription": "Scope refresh retrieval to the trailing N calendar months (month:YYYY-MM tags, current month included), resolved at refresh time so the window rolls forward automatically. Mutually exclusive with tag groups."
   },
   "cronPreview": {
     "invalid": "无效的 cron 表达式",
@@ -1436,7 +1438,9 @@
     "factTypeWorld": "世界",
     "factTypeExperience": "经验",
     "factTypeObservation": "观察",
-    "actionClearContent": "清除内容"
+    "actionClearContent": "清除内容",
+    "labelRollingWindow": "Rolling window",
+    "pillTrailingMonths": "Trailing {months} months"
   },
   "constellation": {
     "instructions": "滚动缩放 · 拖拽平移 · 悬停探索 · 点击选择",

@@ -829,7 +829,9 @@
     "clearDialogConfirm": "Clear",
     "actionClearContent": "Clear Content",
     "emptyContent": "No content yet. Refresh this mental model to generate content.",
-    "selectModelPrompt": "Select a mental model to view its content."
+    "selectModelPrompt": "Select a mental model to view its content.",
+    "optionsRollingMonthsLabel": "Rolling window (months)",
+    "optionsRollingMonthsDescription": "Scope refresh retrieval to the trailing N calendar months (month:YYYY-MM tags, current month included), resolved at refresh time so the window rolls forward automatically. Mutually exclusive with tag groups."
   },
   "cronPreview": {
     "invalid": "Invalid cron expression",
@@ -1436,7 +1438,9 @@
     "factTypeWorld": "world",
     "factTypeExperience": "experience",
     "factTypeObservation": "observation",
-    "actionClearContent": "Clear Content"
+    "actionClearContent": "Clear Content",
+    "labelRollingWindow": "Rolling window",
+    "pillTrailingMonths": "Trailing {months} months"
   },
   "constellation": {
     "instructions": "Scroll to zoom · Drag to pan · Hover to explore · Click to select",

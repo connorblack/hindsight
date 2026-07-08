@@ -10172,6 +10172,20 @@
             "title": "Tag Groups",
             "description": "Compound boolean tag expressions to use during refresh instead of the model's own tags. When set, these tag groups are passed to reflect and the model's flat tags are NOT used for filtering. Supports nested and/or/not expressions for complex tag-based scoping."
           },
+          "rolling_months": {
+            "anyOf": [
+              {
+                "type": "integer",
+                "maximum": 120.0,
+                "minimum": 1.0
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Rolling Months",
+            "description": "Relative retrieval window: scope refresh retrieval to memories tagged with the trailing N calendar months (month:YYYY-MM tags, current month included), resolved at refresh time so the window rolls forward automatically. Mutually exclusive with tag_groups \u2014 a literal tag_groups list freezes the window, which is exactly the staleness this field exists to prevent."
+          },
           "include_chunks": {
             "anyOf": [
               {
@@ -10330,6 +10344,20 @@
             ],
             "title": "Tag Groups",
             "description": "Compound boolean tag expressions to use during refresh instead of the model's own tags. When set, these tag groups are passed to reflect and the model's flat tags are NOT used for filtering. Supports nested and/or/not expressions for complex tag-based scoping."
+          },
+          "rolling_months": {
+            "anyOf": [
+              {
+                "type": "integer",
+                "maximum": 120.0,
+                "minimum": 1.0
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Rolling Months",
+            "description": "Relative retrieval window: scope refresh retrieval to memories tagged with the trailing N calendar months (month:YYYY-MM tags, current month included), resolved at refresh time so the window rolls forward automatically. Mutually exclusive with tag_groups \u2014 a literal tag_groups list freezes the window, which is exactly the staleness this field exists to prevent."
           },
           "include_chunks": {
             "anyOf": [

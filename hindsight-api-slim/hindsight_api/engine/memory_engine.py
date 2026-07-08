@@ -817,6 +817,23 @@ class RefreshTagFiltering:
     tag_groups: list[TagGroup] | None
 
 
+def _rolling_month_tags(months: int, today: datetime | None = None) -> list[str]:
+    """Month tags (``month:YYYY-MM``) for the trailing ``months`` calendar
+    months, current month included — e.g. months=12 in July 2026 yields
+    2025-08 .. 2026-07. Resolved against UTC "now" unless ``today`` is given
+    (tests)."""
+    anchor = (today or datetime.now(UTC)).date().replace(day=1)
+    tags: list[str] = []
+    year, month = anchor.year, anchor.month
+    for _ in range(months):
+        tags.append(f"month:{year:04d}-{month:02d}")
+        month -= 1
+        if month == 0:
+            year, month = year - 1, 12
+    tags.reverse()
+    return tags
+
+
 def _resolve_refresh_tag_filtering(
     model_tags: list[str] | None,
     trigger_data: dict[str, Any],
@@ -827,10 +844,33 @@ def _resolve_refresh_tag_filtering(
     and resolves the tag filtering to use during reflect.
 
     Priority:
+    - If trigger has rolling_months, build the trailing-month tag_groups at
+      refresh time (the window rolls forward automatically; a literal
+      tag_groups list would freeze — the 2026-07 "rolling 12 months that
+      didn't roll" incident)
     - If trigger has tag_groups, use those (overrides flat tags entirely)
     - If trigger has tags_match, use model's tags with that match mode
     - Otherwise default to all_strict when tags present (security isolation)
     """
+    rolling_months = trigger_data.get("rolling_months")
+    if rolling_months:
+        from pydantic import TypeAdapter
+
+        months = _rolling_month_tags(int(rolling_months))
+        adapter = TypeAdapter(TagGroup)
+        parsed = [
+            adapter.validate_python(
+                {"or": [{"tags": [tag], "match": "any_strict"} for tag in months]}
+            )
+        ]
+        logger.info(
+            "[MENTAL_MODEL_REFRESH] rolling_months=%s resolved to window %s..%s",
+            rolling_months,
+            months[0],
+            months[-1],
+        )
+        return RefreshTagFiltering(tags=None, tags_match="any", tag_groups=parsed)
+
     trigger_tag_groups = trigger_data.get("tag_groups")
     if trigger_tag_groups is not None:
         from pydantic import TypeAdapter

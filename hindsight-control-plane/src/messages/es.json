@@ -829,7 +829,9 @@
     "clearDialogConfirm": "Borrar",
     "actionClearContent": "Borrar contenido",
     "emptyContent": "Aún no hay contenido. Actualiza este modelo mental para generar contenido.",
-    "selectModelPrompt": "Selecciona un modelo mental para ver su contenido."
+    "selectModelPrompt": "Selecciona un modelo mental para ver su contenido.",
+    "optionsRollingMonthsLabel": "Rolling window (months)",
+    "optionsRollingMonthsDescription": "Scope refresh retrieval to the trailing N calendar months (month:YYYY-MM tags, current month included), resolved at refresh time so the window rolls forward automatically. Mutually exclusive with tag groups."
   },
   "cronPreview": {
     "invalid": "Expresión cron no válida",
@@ -1436,7 +1438,9 @@
     "factTypeWorld": "mundo",
     "factTypeExperience": "experiencia",
     "factTypeObservation": "observación",
-    "actionClearContent": "Borrar contenido"
+    "actionClearContent": "Borrar contenido",
+    "labelRollingWindow": "Rolling window",
+    "pillTrailingMonths": "Trailing {months} months"
   },
   "constellation": {
     "instructions": "Desplaza para hacer zoom · Arrastra para mover · Pasa el cursor para explorar · Haz clic para seleccionar",

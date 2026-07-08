@@ -2023,6 +2023,18 @@ class MentalModelTrigger(BaseModel):
             "Supports nested and/or/not expressions for complex tag-based scoping."
         ),
     )
+    rolling_months: int | None = Field(
+        default=None,
+        ge=1,
+        le=120,
+        description=(
+            "Relative retrieval window: scope refresh retrieval to memories tagged with the "
+            "trailing N calendar months (month:YYYY-MM tags, current month included), resolved "
+            "at refresh time so the window rolls forward automatically. Mutually exclusive with "
+            "tag_groups — a literal tag_groups list freezes the window, which is exactly the "
+            "staleness this field exists to prevent."
+        ),
+    )
     include_chunks: bool | None = Field(
         default=None,
         description=(
@@ -2074,6 +2086,12 @@ class MentalModelTrigger(BaseModel):
             raise ValueError(
                 "refresh_after_consolidation and refresh_cron are mutually exclusive: "
                 "a mental model refreshes either after consolidation or on a cron schedule, not both."
+            )
+        if self.rolling_months is not None and self.tag_groups is not None:
+            raise ValueError(
+                "rolling_months and tag_groups are mutually exclusive: rolling_months resolves "
+                "the trailing-month window at refresh time, while a literal tag_groups list "
+                "freezes it. Use one or the other."
             )
         return self
 

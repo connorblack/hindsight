@@ -829,7 +829,9 @@
     "clearDialogConfirm": "クリア",
     "actionClearContent": "内容をクリア",
     "emptyContent": "まだコンテンツがありません。このメンタルモデルを更新してコンテンツを生成します。",
-    "selectModelPrompt": "メンタルモデルを選択して内容を表示します。"
+    "selectModelPrompt": "メンタルモデルを選択して内容を表示します。",
+    "optionsRollingMonthsLabel": "Rolling window (months)",
+    "optionsRollingMonthsDescription": "Scope refresh retrieval to the trailing N calendar months (month:YYYY-MM tags, current month included), resolved at refresh time so the window rolls forward automatically. Mutually exclusive with tag groups."
   },
   "cronPreview": {
     "invalid": "無効な cron 式",
@@ -1436,7 +1438,9 @@
     "factTypeWorld": "世界",
     "factTypeExperience": "経験",
     "factTypeObservation": "オブザベーション",
-    "actionClearContent": "内容をクリア"
+    "actionClearContent": "内容をクリア",
+    "labelRollingWindow": "Rolling window",
+    "pillTrailingMonths": "Trailing {months} months"
   },
   "constellation": {
     "instructions": "スクロールでズーム · ドラッグで移動 · ホバーで探索 · クリックで選択",

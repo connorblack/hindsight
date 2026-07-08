@@ -711,6 +711,7 @@ function CreateMentalModelDialog({
     excludeMentalModelIds: "",
     tagsMatch: "" as string,
     tagGroups: "",
+    rollingMonths: "",
     // Recall overrides for refresh: "" means inherit bank/global default
     includeChunks: "" as "" | "true" | "false",
     recallMaxTokens: "",
@@ -770,6 +771,7 @@ function CreateMentalModelDialog({
           exclude_mental_model_ids: excludeIds.length > 0 ? excludeIds : undefined,
           tags_match: (form.tagsMatch as TagsMatch) || undefined,
           tag_groups: tagGroups,
+          rolling_months: form.rollingMonths.trim() ? parseInt(form.rollingMonths, 10) : undefined,
           include_chunks: includeChunks,
           recall_max_tokens: recallMaxTokens,
           recall_chunks_max_tokens: recallChunksMaxTokens,
@@ -790,6 +792,7 @@ function CreateMentalModelDialog({
         excludeMentalModelIds: "",
         tagsMatch: "",
         tagGroups: "",
+        rollingMonths: "",
         includeChunks: "",
         recallMaxTokens: "",
         recallChunksMaxTokens: "",
@@ -1054,6 +1057,23 @@ function CreateMentalModelDialog({
                     {t("optionsTagGroupsDescription")}
                   </p>
                 </div>
+                <div className="space-y-2">
+                  <label className="text-sm font-medium text-foreground">
+                    {t("optionsRollingMonthsLabel")}
+                  </label>
+                  <Input
+                    type="number"
+                    min={1}
+                    max={120}
+                    value={form.rollingMonths}
+                    onChange={(e) => setForm({ ...form, rollingMonths: e.target.value })}
+                    placeholder="12"
+                    disabled={!!form.tagGroups.trim()}
+                  />
+                  <p className="text-xs text-muted-foreground">
+                    {t("optionsRollingMonthsDescription")}
+                  </p>
+                </div>
               </section>
 
               <section className="space-y-4">
@@ -1188,6 +1208,8 @@ function UpdateMentalModelDialog({
     tagGroups: mentalModel.trigger?.tag_groups
       ? JSON.stringify(mentalModel.trigger.tag_groups, null, 2)
       : "",
+    rollingMonths:
+      mentalModel.trigger?.rolling_months != null ? String(mentalModel.trigger.rolling_months) : "",
     includeChunks: (mentalModel.trigger?.include_chunks === true
       ? "true"
       : mentalModel.trigger?.include_chunks === false
@@ -1262,6 +1284,7 @@ function UpdateMentalModelDialog({
           exclude_mental_model_ids: excludeIds.length > 0 ? excludeIds : undefined,
           tags_match: (form.tagsMatch as TagsMatch) || undefined,
           tag_groups: tagGroups,
+          rolling_months: form.rollingMonths.trim() ? parseInt(form.rollingMonths, 10) : undefined,
           include_chunks: includeChunks,
           recall_max_tokens: recallMaxTokens,
           recall_chunks_max_tokens: recallChunksMaxTokens,
@@ -1498,6 +1521,23 @@ function UpdateMentalModelDialog({
                   />
                   <p className="text-xs text-muted-foreground">
                     {t("optionsTagGroupsDescription")}
+                  </p>
+                </div>
+                <div className="space-y-2">
+                  <label className="text-sm font-medium text-foreground">
+                    {t("optionsRollingMonthsLabel")}
+                  </label>
+                  <Input
+                    type="number"
+                    min={1}
+                    max={120}
+                    value={form.rollingMonths}
+                    onChange={(e) => setForm({ ...form, rollingMonths: e.target.value })}
+                    placeholder="12"
+                    disabled={!!form.tagGroups.trim()}
+                  />
+                  <p className="text-xs text-muted-foreground">
+                    {t("optionsRollingMonthsDescription")}
                   </p>
                 </div>
               </section>

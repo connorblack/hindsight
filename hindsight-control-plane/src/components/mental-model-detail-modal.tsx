@@ -1117,6 +1117,17 @@ function ConfigurationTab({ mentalModel }: { mentalModel: MentalModel }) {
           }
         />
         {trigger.refresh_cron && <CronSchedulePreview cron={trigger.refresh_cron} />}
+        {trigger.rolling_months != null && (
+          <Metadata
+            label={t("labelRollingWindow")}
+            value={
+              <Pill
+                label={t("pillTrailingMonths", { months: trigger.rolling_months })}
+                color="bg-blue-500/10 text-blue-600 dark:text-blue-400"
+              />
+            }
+          />
+        )}
         <Metadata
           label={t("labelFactTypes")}
           value={
