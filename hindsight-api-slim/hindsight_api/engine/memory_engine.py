@@ -15,6 +15,7 @@ import functools
 import inspect
 import json
 import logging
+import re
 import sys
 import time
 import uuid
@@ -1132,7 +1133,9 @@ class MemoryEngine(MemoryEngineInterface):
             base_url=retain_base_url,
             model=retain_model,
             reasoning_effort=config.llm_reasoning_effort,
-            extra_body=config.llm_extra_body,
+            extra_body=config.retain_llm_extra_body
+            if config.retain_llm_extra_body is not None
+            else config.llm_extra_body,
             default_headers=config.llm_default_headers,
             litellmrouter_config=config.retain_llm_litellmrouter_config or config.llm_litellmrouter_config,
             bedrock_service_tier=config.llm_bedrock_service_tier,
@@ -1170,7 +1173,9 @@ class MemoryEngine(MemoryEngineInterface):
             base_url=reflect_base_url,
             model=reflect_model,
             reasoning_effort=config.llm_reasoning_effort,
-            extra_body=config.llm_extra_body,
+            extra_body=config.reflect_llm_extra_body
+            if config.reflect_llm_extra_body is not None
+            else config.llm_extra_body,
             default_headers=config.llm_default_headers,
             litellmrouter_config=config.reflect_llm_litellmrouter_config or config.llm_litellmrouter_config,
             bedrock_service_tier=config.llm_bedrock_service_tier,
@@ -1208,7 +1213,11 @@ class MemoryEngine(MemoryEngineInterface):
             base_url=consolidation_base_url,
             model=consolidation_model,
             reasoning_effort=config.llm_reasoning_effort,
-            extra_body=config.llm_extra_body,
+            extra_body=(
+                config.consolidation_llm_extra_body
+                if config.consolidation_llm_extra_body is not None
+                else config.llm_extra_body
+            ),
             default_headers=config.llm_default_headers,
             litellmrouter_config=config.consolidation_llm_litellmrouter_config or config.llm_litellmrouter_config,
             bedrock_service_tier=config.llm_bedrock_service_tier,
@@ -8100,6 +8109,12 @@ class MemoryEngine(MemoryEngineInterface):
             content_dict["context"] = retain_params["context"]
         if retain_params.get("event_date"):
             content_dict["event_date"] = retain_params["event_date"]
+        elif re.fullmatch(r"\d{4}-\d{2}-\d{2}", document_id or ""):
+            # Date-keyed document whose stored retain_params carry no timestamp
+            # (e.g. the original retain omitted it): anchoring the re-extraction to
+            # "now" would resolve every relative date against reprocess time. The
+            # document id IS the entry date — use it.
+            content_dict["event_date"] = f"{document_id}T12:00:00+00:00"
         if retain_params.get("metadata"):
             content_dict["metadata"] = retain_params["metadata"]
         if retain_params.get("entities"):

@@ -119,6 +119,40 @@ class TestPerOperationLLMConfig:
 
         clear_config_cache()
 
+    def test_per_operation_extra_body_overrides_global_body(self, monkeypatch):
+        """Retain/reflect/consolidation should each support their own request body."""
+        from hindsight_api import MemoryEngine
+        from hindsight_api.config import clear_config_cache, get_config
+
+        monkeypatch.setenv("HINDSIGHT_API_LLM_EXTRA_BODY", '{"global": true}')
+        monkeypatch.setenv("HINDSIGHT_API_RETAIN_LLM_EXTRA_BODY", '{"retain": true}')
+        monkeypatch.setenv(
+            "HINDSIGHT_API_REFLECT_LLM_EXTRA_BODY",
+            '{"chat_template_kwargs": {"preserve_thinking": true}}',
+        )
+        monkeypatch.setenv(
+            "HINDSIGHT_API_CONSOLIDATION_LLM_EXTRA_BODY",
+            '{"chat_template_kwargs": {"enable_thinking": false}}',
+        )
+        clear_config_cache()
+
+        config = get_config()
+        assert config.llm_extra_body == {"global": True}
+        assert config.retain_llm_extra_body == {"retain": True}
+        assert config.reflect_llm_extra_body == {"chat_template_kwargs": {"preserve_thinking": True}}
+        assert config.consolidation_llm_extra_body == {"chat_template_kwargs": {"enable_thinking": False}}
+
+        engine = MemoryEngine(
+            skip_llm_verification=True,
+            lazy_reranker=True,
+        )
+        assert engine._llm_config.extra_body == {"global": True}
+        assert engine._retain_llm_config.extra_body == {"retain": True}
+        assert engine._reflect_llm_config.extra_body == {"chat_template_kwargs": {"preserve_thinking": True}}
+        assert engine._consolidation_llm_config.extra_body == {"chat_template_kwargs": {"enable_thinking": False}}
+
+        clear_config_cache()
+
     def test_memory_engine_with_explicit_params(self):
         """Test that explicit params override env config."""
         from hindsight_api import MemoryEngine
@@ -196,7 +230,7 @@ class TestMockLLMProvider:
                 scope="test_scope",
             )
 
-        result = asyncio.get_event_loop().run_until_complete(make_call())
+        asyncio.get_event_loop().run_until_complete(make_call())
 
         # Verify call was recorded
         calls = provider.get_mock_calls()

@@ -35,7 +35,9 @@ _PROCESSING_RULES = """## PROCESSING RULES
 
 8. NO COMPUTATION: you do not have the full picture — never calculate, derive, or adjust numeric values. If the user says "I have 2 dogs" and then "I have a dog named Rex", do NOT update the count to 3 — you don't know if Rex is one of the 2 or a new one. If the user says "I sold X", do NOT decrement a count. Only update a count when the user explicitly states a new count. Synthesize and consolidate what was stated, but never do arithmetic or logical deductions.
 
-9. KEEP DISTINCT TOPICS DISTINCT: do not merge observations about different people, entities, or unrelated topics. Merging is for the same canonical fact recurring — not for related-but-distinct claims."""
+9. KEEP DISTINCT TOPICS DISTINCT: do not merge observations about different people, entities, or unrelated topics. Merging is for the same canonical fact recurring — not for related-but-distinct claims.
+
+10. DATES COME ONLY FROM THE SOURCE FACTS: copy dates exactly as written in the facts and their temporal fields. NEVER introduce an absolute date that appears in no source fact, never re-derive a date from any notion of the current date, and never adjust a date to "update" it. If a TEMPORAL SCOPE is provided in the input, treat it as the authoritative period the facts belong to."""
 
 # Stable description of the input shape. For the cached split path this lives in
 # the system prefix (build_consolidation_system_prompt) so it is not re-sent on
@@ -209,19 +211,26 @@ def build_consolidation_input(
     observations_text: str,
     observations_mission: str | None = None,
     observation_capacity_note: str | None = None,
+    scope_anchor_note: str | None = None,
 ) -> str:
     """Per-batch user message: MISSION + INPUT data + any capacity constraint.
 
     The MISSION lives here (not in the cached system prefix) so the prefix stays
     bank-agnostic and one CachedContent serves every bank. The capacity note also
-    lives here since it varies as observation slots fill.
+    lives here since it varies as observation slots fill. ``scope_anchor_note``
+    (when the batch has a coherent temporal scope, e.g. day-scoped journal facts)
+    pins the authoritative period so the model never re-derives dates from any
+    notion of the current date (processing rule 10).
     """
     mission = escape_for_prompt(observations_mission or _DEFAULT_MISSION)
     mission_section = f"## MISSION\n\n{mission}\n\n"
     capacity_section = ""
     if observation_capacity_note:
         capacity_section = f"## CAPACITY CONSTRAINT\n\n{escape_for_prompt(observation_capacity_note)}\n\n"
+    scope_section = ""
+    if scope_anchor_note:
+        scope_section = f"## TEMPORAL SCOPE\n\n{escape_for_prompt(scope_anchor_note)}\n\n"
     # _SPLIT_INPUT_SECTION omits the stable observation-format explanation (now in
     # the cached system prefix) — only the variable facts/observations remain.
-    template = mission_section + capacity_section + _SPLIT_INPUT_SECTION
+    template = mission_section + scope_section + capacity_section + _SPLIT_INPUT_SECTION
     return template.format(facts_text=facts_text, observations_text=observations_text)

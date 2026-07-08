@@ -2207,11 +2207,30 @@ async def _consolidate_batch_with_llm(
     system_prompt = build_consolidation_system_prompt(
         llm_output_language=getattr(config, "llm_output_language", None),
     )
+    # Day/week/month-scoped batches share one temporal scope — pin it in the prompt
+    # so the model anchors every date decision to the facts' own period (rule 10),
+    # never to its notion of the current date.
+    scope_anchor_note = None
+    scope_temporal_tags = sorted(
+        {
+            t
+            for m in memories
+            for t in (m.get("tags") or [])
+            if isinstance(t, str) and t.startswith(("day:", "week:", "month:", "year:"))
+        }
+    )
+    if scope_temporal_tags:
+        scope_anchor_note = (
+            "All new facts in this batch belong to the journal temporal scope "
+            f"{', '.join(scope_temporal_tags[:8])}. The facts' own dates and temporal "
+            "fields are authoritative; do not introduce dates from outside them."
+        )
     user_content = build_consolidation_input(
         facts_text=facts_lines,
         observations_text=observations_text,
         observations_mission=config.observations_mission,
         observation_capacity_note=observation_capacity_note,
+        scope_anchor_note=scope_anchor_note,
     )
 
     # Opt into context caching of the stable system prefix when the provider

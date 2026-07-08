@@ -2294,6 +2294,16 @@ def _build_contents(contents_dicts: list[RetainContentDict], document_tags: list
             event_date_value = parse_datetime_flexible(item["event_date"])
         else:
             event_date_value = utcnow()
+            # A backfilled document anchored to "now" makes the extraction LLM resolve
+            # every relative date against ingest time (the 2026-06-24 refill incident).
+            # Loud visibility beats a silent default.
+            logger.warning(
+                "retain: no timestamp/event_date provided for document_id=%s — "
+                "defaulting Event Date to now (%s). Relative dates in the content "
+                "will be resolved against ingest time.",
+                item.get("document_id"),
+                event_date_value.isoformat(),
+            )
 
         content = RetainContent(
             content=item["content"],

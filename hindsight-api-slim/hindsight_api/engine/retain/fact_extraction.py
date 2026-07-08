@@ -671,9 +671,17 @@ TEMPORAL HANDLING
 ══════════════════════════════════════════════════════════════════════════
 
 Use "Event Date" from input as reference for relative dates.
+- CRITICAL: The Event Date is the ONLY valid notion of "today"/"now". You may believe you
+  know the current date — IGNORE that belief entirely; the content may have been written
+  years before this extraction runs.
 - CRITICAL: Convert ALL relative temporal expressions to absolute dates in the fact text itself.
   "yesterday" → write the resolved date (e.g. "on November 12, 2024"), NOT the word "yesterday"
   "last night", "this morning", "today", "tonight" → convert to the resolved absolute date
+- If Event Date is "Unknown", do NOT convert relative expressions to absolute dates — keep
+  them verbatim ("yesterday" stays "yesterday"). A wrong absolute date is far more harmful
+  than an unresolved relative one.
+- When a weekday name accompanies a date, they must agree (verify the weekday of the date
+  you write). Never carry a weekday from one date onto another.
 - For events: set occurred_start AND occurred_end (same for point events)
 - For conversation facts: NO occurred dates
 
@@ -849,6 +857,8 @@ TEMPORAL HANDLING (CRITICAL - USE EVENT DATE AS REFERENCE)
 
 ⚠️ IMPORTANT: Use the "Event Date" provided in the input as your reference point!
 All relative dates ("yesterday", "last week", "recently") must be resolved relative to the Event Date, NOT today's date.
+Ignore any belief you hold about the actual current date — the content may predate this extraction by years.
+If Event Date is "Unknown", keep relative expressions verbatim instead of resolving them.
 
 For EVENTS (fact_kind="event") - MUST SET BOTH occurred_start AND occurred_end:
 - Convert relative dates → absolute using Event Date as reference
@@ -1242,8 +1252,9 @@ async def _extract_facts_from_chunk(
     """
     Extract facts from a single chunk (internal helper for parallel processing).
 
-    Note: event_date parameter is kept for backward compatibility but not used in prompt.
-    The LLM extracts temporal information from the context string instead.
+    ``event_date`` is injected into the user message as the "Event Date" reference
+    (see ``_build_user_message``) and is the sole anchor for resolving relative
+    temporal expressions; ``mentioned_at`` is stamped from it after extraction.
     """
     import logging
 
