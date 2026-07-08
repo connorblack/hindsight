@@ -1,6 +1,7 @@
 "use client";
 
 import { useState, useEffect, useCallback, useMemo } from "react";
+import { formatUTCDate } from "@/lib/relative-time";
 import { useTranslations } from "next-intl";
 import { toast } from "sonner";
 import { client, LLMRequestEntry } from "@/lib/api";
@@ -472,9 +473,9 @@ function InvalidatedFactsSection({ bankId, documentId }: { bankId: string; docum
               )}
               {row.occurred_start && (
                 <div className="text-xs text-muted-foreground mt-0.5">
-                  {new Date(row.occurred_start).toLocaleDateString()}
+                  {formatUTCDate(row.occurred_start)}
                   {row.occurred_end && row.occurred_end !== row.occurred_start && (
-                    <> → {new Date(row.occurred_end).toLocaleDateString()}</>
+                    <> → {formatUTCDate(row.occurred_end)}</>
                   )}
                 </div>
               )}

@@ -1,6 +1,7 @@
 "use client";
 
 import { useState, useEffect } from "react";
+import { formatUTCDate } from "@/lib/relative-time";
 import { useTranslations } from "next-intl";
 import { client } from "@/lib/api";
 import { useBank } from "@/lib/bank-context";
@@ -299,12 +300,12 @@ export function MemoryDetailModal({
                         <div className="flex items-center gap-2 text-sm text-foreground">
                           <Calendar className="h-4 w-4 text-muted-foreground flex-shrink-0" />
                           <span>
-                            {new Date(memory.occurred_start).toLocaleString()}
+                            {formatUTCDate(memory.occurred_start)}
                             {memory.occurred_end &&
                               memory.occurred_end !== memory.occurred_start && (
                                 <>
                                   <span className="text-muted-foreground mx-1">→</span>
-                                  {new Date(memory.occurred_end).toLocaleString()}
+                                  {formatUTCDate(memory.occurred_end)}
                                 </>
                               )}
                           </span>
@@ -319,7 +320,7 @@ export function MemoryDetailModal({
                         </div>
                         <div className="flex items-center gap-2 text-sm text-foreground">
                           <Calendar className="h-4 w-4 text-muted-foreground flex-shrink-0" />
-                          <span>{new Date(memory.mentioned_at).toLocaleString()}</span>
+                          <span>{formatUTCDate(memory.mentioned_at)}</span>
                         </div>
                       </div>
                     )}
@@ -412,7 +413,7 @@ export function MemoryDetailModal({
                                       {t("sourceOccurred")}
                                     </div>
                                     <div className="font-medium">
-                                      {new Date(source.occurred_start).toLocaleString()}
+                                      {formatUTCDate(source.occurred_start)}
                                     </div>
                                   </div>
                                 )}
@@ -422,7 +423,7 @@ export function MemoryDetailModal({
                                       {t("sourceMentioned")}
                                     </div>
                                     <div className="font-medium">
-                                      {new Date(source.mentioned_at).toLocaleString()}
+                                      {formatUTCDate(source.mentioned_at)}
                                     </div>
                                   </div>
                                 )}
@@ -607,12 +608,12 @@ export function MemoryDetailModal({
                             <div className="flex items-center gap-2 text-sm text-foreground">
                               <Calendar className="h-4 w-4 text-muted-foreground flex-shrink-0" />
                               <span>
-                                {new Date(memory.occurred_start).toLocaleString()}
+                                {formatUTCDate(memory.occurred_start)}
                                 {memory.occurred_end &&
                                   memory.occurred_end !== memory.occurred_start && (
                                     <>
                                       <span className="text-muted-foreground mx-1">→</span>
-                                      {new Date(memory.occurred_end).toLocaleString()}
+                                      {formatUTCDate(memory.occurred_end)}
                                     </>
                                   )}
                               </span>
@@ -627,7 +628,7 @@ export function MemoryDetailModal({
                             </div>
                             <div className="flex items-center gap-2 text-sm text-foreground">
                               <Calendar className="h-4 w-4 text-muted-foreground flex-shrink-0" />
-                              <span>{new Date(memory.mentioned_at).toLocaleString()}</span>
+                              <span>{formatUTCDate(memory.mentioned_at)}</span>
                             </div>
                           </div>
                         )}

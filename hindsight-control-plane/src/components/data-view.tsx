@@ -3,6 +3,7 @@
 import { useState, useEffect, useRef, useMemo, useCallback } from "react";
 import { useTranslations } from "next-intl";
 import { client } from "@/lib/api";
+import { formatUTCDate } from "@/lib/relative-time";
 import { useBank } from "@/lib/bank-context";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -883,18 +884,10 @@ export function DataView({
                             <TableBody>
                               {paginatedRows.map((row: any, idx: number) => {
                                 const occurredDisplay = row.occurred_start
-                                  ? new Date(row.occurred_start).toLocaleDateString("en-US", {
-                                      month: "short",
-                                      day: "numeric",
-                                      year: "numeric",
-                                    })
+                                  ? formatUTCDate(row.occurred_start)
                                   : null;
                                 const mentionedDisplay = row.mentioned_at
-                                  ? new Date(row.mentioned_at).toLocaleDateString("en-US", {
-                                      month: "short",
-                                      day: "numeric",
-                                      year: "numeric",
-                                    })
+                                  ? formatUTCDate(row.mentioned_at)
                                   : null;
 
                                 return (
@@ -1115,10 +1108,12 @@ function TimelineView({
   const timelineGroups = useMemo(() => {
     if (sortedItems.length === 0) return [];
 
+    // F10: occurred_start is a UTC calendar date — bucket by UTC getters or
+    // edge rows fall into the previous local day's group.
     const getGroupKey = (date: Date): string => {
-      const year = date.getFullYear();
-      const month = date.getMonth();
-      const day = date.getDate();
+      const year = date.getUTCFullYear();
+      const month = date.getUTCMonth();
+      const day = date.getUTCDate();
 
       switch (granularity) {
         case "year":
@@ -1127,8 +1122,8 @@ function TimelineView({
           return `${year}-${String(month + 1).padStart(2, "0")}`;
         case "week":
           const startOfWeek = new Date(date);
-          startOfWeek.setDate(day - date.getDay());
-          return `${startOfWeek.getFullYear()}-W${String(Math.ceil(startOfWeek.getDate() / 7)).padStart(2, "0")}-${String(startOfWeek.getMonth() + 1).padStart(2, "0")}-${String(startOfWeek.getDate()).padStart(2, "0")}`;
+          startOfWeek.setUTCDate(day - date.getUTCDay());
+          return `${startOfWeek.getUTCFullYear()}-W${String(Math.ceil(startOfWeek.getUTCDate() / 7)).padStart(2, "0")}-${String(startOfWeek.getUTCMonth() + 1).padStart(2, "0")}-${String(startOfWeek.getUTCDate()).padStart(2, "0")}`;
         case "day":
           return `${year}-${String(month + 1).padStart(2, "0")}-${String(day).padStart(2, "0")}`;
       }
@@ -1139,13 +1134,14 @@ function TimelineView({
         case "year":
           return key;
         case "month":
-          return date.toLocaleDateString("en-US", { year: "numeric", month: "short" });
+          return date.toLocaleDateString("en-US", { timeZone: "UTC", year: "numeric", month: "short" });
         case "week":
           const endOfWeek = new Date(date);
-          endOfWeek.setDate(date.getDate() + 6);
-          return `${date.toLocaleDateString("en-US", { month: "short", day: "numeric" })} - ${endOfWeek.toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" })}`;
+          endOfWeek.setUTCDate(date.getUTCDate() + 6);
+          return `${date.toLocaleDateString("en-US", { timeZone: "UTC", month: "short", day: "numeric" })} - ${endOfWeek.toLocaleDateString("en-US", { timeZone: "UTC", month: "short", day: "numeric", year: "numeric" })}`;
         case "day":
           return date.toLocaleDateString("en-US", {
+            timeZone: "UTC",
             weekday: "short",
             month: "short",
             day: "numeric",
@@ -1163,7 +1159,7 @@ function TimelineView({
         let groupDate = date;
         if (granularity === "week") {
           const parts = key.split("-");
-          groupDate = new Date(parseInt(parts[0]), parseInt(parts[2]) - 1, parseInt(parts[3]));
+          groupDate = new Date(Date.UTC(parseInt(parts[0]), parseInt(parts[2]) - 1, parseInt(parts[3])));
         }
         groups[key] = { items: [], date: groupDate };
       }
@@ -1230,9 +1226,16 @@ function TimelineView({
   }
 
   const formatDateTime = (dateStr: string) => {
+    // F10: occurred_start is a UTC calendar date; render in UTC (time is
+    // storage-anchored midnight — kept for layout, not meaningful).
     const date = new Date(dateStr);
-    const dateFormatted = date.toLocaleDateString("en-US", { month: "short", day: "numeric" });
+    const dateFormatted = date.toLocaleDateString("en-US", {
+      timeZone: "UTC",
+      month: "short",
+      day: "numeric",
+    });
     const timeFormatted = date.toLocaleTimeString("en-US", {
+      timeZone: "UTC",
       hour: "2-digit",
       minute: "2-digit",
       hour12: false,
@@ -1259,8 +1262,8 @@ function TimelineView({
               ` ${t("timelineWithoutDates", { count: itemsWithoutDates.length })}`}
             {dateRange && (
               <span className="ml-2 text-foreground">
-                ({dateRange.first.toLocaleDateString("en-US", { month: "short", year: "numeric" })}{" "}
-                → {dateRange.last.toLocaleDateString("en-US", { month: "short", year: "numeric" })})
+                ({dateRange.first.toLocaleDateString("en-US", { timeZone: "UTC", month: "short", year: "numeric" })}{" "}
+                → {dateRange.last.toLocaleDateString("en-US", { timeZone: "UTC", month: "short", year: "numeric" })})
               </span>
             )}
           </div>

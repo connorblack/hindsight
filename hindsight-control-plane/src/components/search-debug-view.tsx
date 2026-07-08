@@ -1,6 +1,7 @@
 "use client";
 
 import { useState } from "react";
+import { formatUTCDate } from "@/lib/relative-time";
 import { useTranslations } from "next-intl";
 import { client } from "@/lib/api";
 import { useBank } from "@/lib/bank-context";
@@ -414,7 +415,7 @@ export function SearchDebugView() {
                                 )}
                                 {result.occurred_start && (
                                   <span>
-                                    {new Date(result.occurred_start).toLocaleDateString()}
+                                    {formatUTCDate(result.occurred_start)}
                                   </span>
                                 )}
                               </div>
@@ -614,15 +615,11 @@ export function SearchDebugView() {
                                                       <span className="flex items-center gap-1 text-[10px] text-muted-foreground">
                                                         <Calendar className="h-3 w-3" />
                                                         {method.metadata.constraint.start
-                                                          ? new Date(
-                                                              method.metadata.constraint.start
-                                                            ).toLocaleDateString()
+                                                          ? formatUTCDate(method.metadata.constraint.start)
                                                           : "any"}
                                                         {" → "}
                                                         {method.metadata.constraint.end
-                                                          ? new Date(
-                                                              method.metadata.constraint.end
-                                                            ).toLocaleDateString()
+                                                          ? formatUTCDate(method.metadata.constraint.end)
                                                           : "any"}
                                                       </span>
                                                     )}

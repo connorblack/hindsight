@@ -1,6 +1,7 @@
 "use client";
 
 import { useState, useEffect } from "react";
+import { formatUTCDate } from "@/lib/relative-time";
 import { useTranslations } from "next-intl";
 import { Button } from "@/components/ui/button";
 import { TagList } from "@/components/ui/tag-list";
@@ -435,12 +436,12 @@ export function MemoryDetailPanel({
                   <div className="flex items-center gap-2 text-sm text-foreground">
                     <Calendar className="h-4 w-4 text-muted-foreground flex-shrink-0" />
                     <span>
-                      {new Date(displayMemory.occurred_start).toLocaleString()}
+                      {formatUTCDate(displayMemory.occurred_start)}
                       {displayMemory.occurred_end &&
                         displayMemory.occurred_end !== displayMemory.occurred_start && (
                           <>
                             <span className="text-muted-foreground mx-1">→</span>
-                            {new Date(displayMemory.occurred_end).toLocaleString()}
+                            {formatUTCDate(displayMemory.occurred_end)}
                           </>
                         )}
                     </span>
@@ -455,7 +456,7 @@ export function MemoryDetailPanel({
                   </div>
                   <div className="flex items-center gap-2 text-sm text-foreground">
                     <Calendar className="h-4 w-4 text-muted-foreground flex-shrink-0" />
-                    <span>{new Date(displayMemory.mentioned_at).toLocaleString()}</span>
+                    <span>{formatUTCDate(displayMemory.mentioned_at)}</span>
                   </div>
                 </div>
               )}
@@ -538,7 +539,7 @@ export function MemoryDetailPanel({
                             </div>
                             <div className="font-medium">
                               {source.occurred_start
-                                ? new Date(source.occurred_start).toLocaleString()
+                                ? formatUTCDate(source.occurred_start)
                                 : t("notAvailable")}
                             </div>
                           </div>
@@ -548,7 +549,7 @@ export function MemoryDetailPanel({
                             </div>
                             <div className="font-medium">
                               {source.mentioned_at
-                                ? new Date(source.mentioned_at).toLocaleString()
+                                ? formatUTCDate(source.mentioned_at)
                                 : t("notAvailable")}
                             </div>
                           </div>
@@ -715,12 +716,12 @@ export function MemoryDetailPanel({
                     className={`${compact ? "h-3 w-3" : "h-4 w-4"} text-muted-foreground flex-shrink-0`}
                   />
                   <span>
-                    {new Date(displayMemory.occurred_start).toLocaleString()}
+                    {formatUTCDate(displayMemory.occurred_start)}
                     {displayMemory.occurred_end &&
                       displayMemory.occurred_end !== displayMemory.occurred_start && (
                         <>
                           <span className="text-muted-foreground mx-1">→</span>
-                          {new Date(displayMemory.occurred_end).toLocaleString()}
+                          {formatUTCDate(displayMemory.occurred_end)}
                         </>
                       )}
                   </span>
@@ -737,7 +738,7 @@ export function MemoryDetailPanel({
                   <Calendar
                     className={`${compact ? "h-3 w-3" : "h-4 w-4"} text-muted-foreground flex-shrink-0`}
                   />
-                  <span>{new Date(displayMemory.mentioned_at).toLocaleString()}</span>
+                  <span>{formatUTCDate(displayMemory.mentioned_at)}</span>
                 </div>
               </div>
             )}

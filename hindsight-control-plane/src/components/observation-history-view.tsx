@@ -1,6 +1,7 @@
 "use client";
 
 import { useState } from "react";
+import { formatUTCDate } from "@/lib/relative-time";
 import { useTranslations } from "next-intl";
 import { ChevronLeft, ChevronRight } from "lucide-react";
 import { Button } from "@/components/ui/button";
@@ -148,15 +149,15 @@ function DateDiff({
       {changed ? (
         <>
           <span className="text-xs bg-red-500/15 text-red-700 dark:text-red-400 line-through rounded-sm px-0.5">
-            {before ? new Date(before).toLocaleString() : "—"}
+            {before ? formatUTCDate(before) : "—"}
           </span>
           {" → "}
           <span className="text-xs bg-green-500/15 text-green-700 dark:text-green-400 rounded-sm px-0.5">
-            {after ? new Date(after).toLocaleString() : "—"}
+            {after ? formatUTCDate(after) : "—"}
           </span>
         </>
       ) : (
-        <span className="text-xs">{after ? new Date(after).toLocaleString() : "—"}</span>
+        <span className="text-xs">{after ? formatUTCDate(after) : "—"}</span>
       )}
     </div>
   );
