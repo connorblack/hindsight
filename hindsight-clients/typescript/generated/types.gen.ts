@@ -453,7 +453,7 @@ export type BankTemplateConfig = {
   /**
    * Retain Extraction Mode
    *
-   * Fact extraction mode: 'concise' (default), 'verbose', or 'custom'
+   * Fact extraction mode: 'concise' (default), 'verbose', 'custom', 'verbatim', or 'chunks'
    */
   retain_extraction_mode?: string | null;
   /**
@@ -1080,7 +1080,7 @@ export type CreateBankRequest = {
   /**
    * Retain Extraction Mode
    *
-   * Fact extraction mode: 'concise' (default), 'verbose', or 'custom'.
+   * Fact extraction mode: 'concise' (default), 'verbose', 'custom', 'verbatim', or 'chunks'.
    */
   retain_extraction_mode?: string | null;
   /**
@@ -4631,7 +4631,14 @@ export type GetAgentStatsData = {
      */
     bank_id: string;
   };
-  query?: never;
+  query?: {
+    /**
+     * Refresh
+     *
+     * Force a fresh recompute, bypassing the cached value (and refreshing the cache).
+     */
+    refresh?: boolean;
+  };
   url: "/v1/default/banks/{bank_id}/stats";
 };
 

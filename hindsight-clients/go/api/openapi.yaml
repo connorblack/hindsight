@@ -7,7 +7,7 @@ info:
     name: Apache 2.0
     url: https://www.apache.org/licenses/LICENSE-2.0.html
   title: Hindsight HTTP API
-  version: 0.8.3
+  version: 0.8.4
 servers:
 - url: /
 paths:
@@ -583,6 +583,19 @@ paths:
           title: Bank Id
           type: string
         style: simple
+      - description: "Force a fresh recompute, bypassing the cached value (and refreshing\
+          \ the cache)."
+        explode: true
+        in: query
+        name: refresh
+        required: false
+        schema:
+          default: false
+          description: "Force a fresh recompute, bypassing the cached value (and refreshing\
+            \ the cache)."
+          title: Refresh
+          type: boolean
+        style: form
       - explode: false
         in: header
         name: authorization
@@ -6326,6 +6339,9 @@ components:
           date: 2024-01-15T10:30:00Z
           entities: "Alice (PERSON), Google (ORGANIZATION)"
           id: 550e8400-e29b-41d4-a716-446655440000
+          metadata:
+            channel: engineering
+            source: slack
           text: Alice works at Google on the AI team
           type: world
         limit: 100

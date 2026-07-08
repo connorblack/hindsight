@@ -45,7 +45,7 @@ from ..utils import mask_network_location
 from ..worker.exceptions import DeferOperation, RetryTaskAt
 from ..worker.stage import set_stage
 from .audit import AuditLogger, audit_context
-from .bank_stats_cache import BankStatsCache
+from .bank_stats_cache import BankStatsCache, DistributedBankStatsCache
 from .db import DatabaseBackend, create_database_backend
 from .db_budget import budgeted_operation
 from .llm_interface import ProviderRateLimitResetError
@@ -918,7 +918,6 @@ class MemoryEngine(MemoryEngineInterface):
         operation_validator: "OperationValidatorExtension | None" = None,
         tenant_extension: "TenantExtension | None" = None,
         skip_llm_verification: bool | None = None,
-        lazy_reranker: bool | None = None,
     ):
         """
         Initialize the temporal + semantic memory system.
@@ -960,9 +959,6 @@ class MemoryEngine(MemoryEngineInterface):
                              If provided, operations require a RequestContext for authentication.
             skip_llm_verification: Skip LLM connection verification during initialization.
                                   Defaults to HINDSIGHT_API_SKIP_LLM_VERIFICATION env var or False.
-            lazy_reranker: Delay reranker initialization until first use. Useful for retain-only
-                          operations that don't need the cross-encoder. Defaults to
-                          HINDSIGHT_API_LAZY_RERANKER env var or False.
         """
         # Load config from environment for any missing parameters
         from ..config import _get_raw_config, get_config
@@ -979,7 +975,6 @@ class MemoryEngine(MemoryEngineInterface):
         self._skip_llm_verification = (
             skip_llm_verification if skip_llm_verification is not None else config.skip_llm_verification
         )
-        self._lazy_reranker = lazy_reranker if lazy_reranker is not None else config.lazy_reranker
 
         # Apply defaults from config
         db_url = db_url or config.database_url
@@ -1331,14 +1326,21 @@ class MemoryEngine(MemoryEngineInterface):
             regex_defense.set_context(self._ext_ctx)
             self._memory_defense = regex_defense
 
-        # Cache for get_bank_stats — short TTL + concurrent-loader coalescing.
-        # The query joins memory_links to memory_units and can be a multi-second
-        # parallel scan on large banks; a single polling client used to be able
-        # to pin the primary by issuing several concurrent calls.
-        self._bank_stats_cache = BankStatsCache(
-            ttl_seconds=config.bank_stats_cache_ttl_seconds,
-            max_entries=config.bank_stats_cache_max_entries,
-        )
+        # Cache for get_bank_stats — the query aggregates over memory_links /
+        # unit_entities and can be a multi-second scan on large banks. On
+        # PostgreSQL we back it with the shared bank_stats_cache table so one
+        # worker's computation serves all workers (and survives restarts);
+        # Oracle keeps the per-process in-memory cache.
+        if self._database_backend_type == "postgresql":
+            self._bank_stats_cache: BankStatsCache | DistributedBankStatsCache = DistributedBankStatsCache(
+                backend=self._backend,
+                ttl_seconds=config.bank_stats_cache_ttl_seconds,
+            )
+        else:
+            self._bank_stats_cache = BankStatsCache(
+                ttl_seconds=config.bank_stats_cache_ttl_seconds,
+                max_entries=config.bank_stats_cache_max_entries,
+            )
 
     @property
     def audit_logger(self) -> AuditLogger:
@@ -2757,16 +2759,16 @@ class MemoryEngine(MemoryEngineInterface):
                             f"set HINDSIGHT_API_RETAIN_BATCH_ENABLED=false."
                         )
 
-        # Build list of initialization tasks
+        # Build list of initialization tasks. The cross-encoder is initialized
+        # eagerly here (single-threaded, before any request is served) so that
+        # the per-request ensure_initialized() guard always short-circuits and
+        # concurrent cold-start recalls can never double-load the model.
         init_tasks = [
             start_pg0(),
             init_embeddings(),
             init_query_analyzer(),
+            init_cross_encoder(),
         ]
-
-        # Only init cross-encoder eagerly if not using lazy initialization
-        if not self._lazy_reranker:
-            init_tasks.append(init_cross_encoder())
 
         # Only verify LLM if not skipping
         if not self._skip_llm_verification:
@@ -6577,13 +6579,18 @@ class MemoryEngine(MemoryEngineInterface):
                     )
 
                 collist = await self._memory_unit_columns(conn)
-                # The archive is cold storage, never a recall surface, so the schema gives it
-                # no `embedding` column at all (dropped in d4f6a8c2e1b3). The move in/out is
-                # therefore over every memory_units column EXCEPT embedding; on revert the
-                # embedding is recomputed from the unit's text/dates/entities below. This makes
-                # a model switch (which re-dimensions memory_units) structurally unable to trip
-                # a vector-dimension mismatch on the INSERT … SELECT round-trip (#2209).
-                arch_cols = ", ".join(c for c in (s.strip() for s in collist.split(",")) if c != '"embedding"')
+                # The archive is cold storage, never a recall surface and carries no index,
+                # so the schema gives it neither the `embedding` (dropped in d4f6a8c2e1b3)
+                # nor the `search_vector` column (dropped in e7c3a9f1b2d5). Both are
+                # recall-surface columns whose type/shape follows server
+                # config, so the move in/out is over every memory_units column EXCEPT those
+                # two; on revert each is recomputed from the unit's text/dates/entities below.
+                # This makes a model switch (which re-dimensions memory_units) structurally
+                # unable to trip a vector-dimension mismatch (#2209), and a text-search backend
+                # switch unable to trip a search_vector type mismatch (#2503), on the
+                # INSERT … SELECT round-trip.
+                _archive_omitted = ('"embedding"', '"search_vector"')
+                arch_cols = ", ".join(c for c in (s.strip() for s in collist.split(",")) if c not in _archive_omitted)
 
                 # --- Edit fields (live rows only): text / context / dates / fact_type / entities ---
                 doing_edit = any(
@@ -6641,6 +6648,17 @@ class MemoryEngine(MemoryEngineInterface):
                         mentioned_at=live["mentioned_at"],
                         entities=[r["canonical_name"] for r in ent_rows],
                     )
+                    # Keep the stored text-search vector in sync with curated
+                    # text/context edits. Use the incoming parameters here:
+                    # PostgreSQL evaluates UPDATE RHS expressions before the
+                    # sibling SET assignments take effect, so column references
+                    # would see the pre-edit text/context.
+                    from .db.ops_postgresql import pg_search_vector_expr
+
+                    sv_expr = pg_search_vector_expr(get_config(), text_col="$3", context_col="$4")
+                    search_vector_clause = (
+                        f",\n                            search_vector = {sv_expr}" if sv_expr else ""
+                    )
                     await enqueue_relink_victims(conn, bank_id, [memory_id], ops=backend.ops)
                     await conn.execute(
                         f"""
@@ -6648,7 +6666,7 @@ class MemoryEngine(MemoryEngineInterface):
                         SET text = $3, context = $4, fact_type = $5, occurred_start = $6,
                             occurred_end = $7, event_date = $8, embedding = $9::vector,
                             consolidated_at = NULL, consolidation_failed_at = NULL,
-                            edited_at = now(), updated_at = now()
+                            edited_at = now(), updated_at = now(){search_vector_clause}
                         WHERE id = $1 AND bank_id = $2
                         """,
                         str(memory_uuid),
@@ -6702,14 +6720,29 @@ class MemoryEngine(MemoryEngineInterface):
                     arch_row = await conn.fetchrow(
                         f"SELECT entity_ids FROM {arch} WHERE id = $1 AND bank_id = $2", str(memory_uuid), bank_id
                     )
-                    # The archive has no embedding column (see arch_cols above), so the live
-                    # row's embedding defaults to NULL on the way back and is recomputed below
-                    # once entities are restored.
+                    # The archive keeps neither embedding nor search_vector (see arch_cols
+                    # above), so both default to NULL on the way back and are recomputed here:
+                    # the embedding below once entities are restored, the search_vector now
+                    # from the row's own text/context/text_signals.
                     await conn.execute(
                         f"INSERT INTO {mu} ({arch_cols}) SELECT {arch_cols} FROM {arch} WHERE id = $1 AND bank_id = $2",
                         str(memory_uuid),
                         bank_id,
                     )
+                    # Rebuild search_vector using the *current* text-search backend, so the
+                    # reverted unit is keyword-searchable again (more correct than carrying a
+                    # verbatim copy that could be stale/wrong-type if the backend changed while
+                    # the fact sat archived). None = pgroonga/pg_textsearch/pg_search, which
+                    # index base columns directly and leave search_vector empty (#2503).
+                    from .db.ops_postgresql import pg_search_vector_expr
+
+                    sv_expr = pg_search_vector_expr(get_config())
+                    if sv_expr is not None:
+                        await conn.execute(
+                            f"UPDATE {mu} SET search_vector = {sv_expr} WHERE id = $1 AND bank_id = $2",
+                            str(memory_uuid),
+                            bank_id,
+                        )
                     # Re-consolidate from scratch; links are rebuilt by graph maintenance.
                     await conn.execute(
                         f"UPDATE {mu} SET consolidated_at = NULL, consolidation_failed_at = NULL, updated_at = now() "
@@ -7453,7 +7486,7 @@ class MemoryEngine(MemoryEngineInterface):
                 f"""
                 SELECT id, text, event_date, context, fact_type, document_id,
                        mentioned_at, occurred_start, occurred_end, chunk_id, proof_count,
-                       tags, consolidated_at, consolidation_failed_at, edited_at, {curation_cols}
+                       tags, metadata, consolidated_at, consolidation_failed_at, edited_at, {curation_cols}
                 FROM {source_table}
                 {where_clause}
                 ORDER BY mentioned_at DESC NULLS LAST, created_at DESC
@@ -7508,6 +7541,7 @@ class MemoryEngine(MemoryEngineInterface):
                         "chunk_id": row["chunk_id"] if row["chunk_id"] else None,
                         "proof_count": row["proof_count"] if row["proof_count"] is not None else 1,
                         "tags": list(row["tags"]) if row["tags"] else [],
+                        "metadata": conn.parse_json(row["metadata"]) if row["metadata"] is not None else {},
                         "consolidated_at": row["consolidated_at"].isoformat() if row["consolidated_at"] else None,
                         "consolidation_failed_at": (
                             row["consolidation_failed_at"].isoformat() if row["consolidation_failed_at"] else None
@@ -7560,7 +7594,7 @@ class MemoryEngine(MemoryEngineInterface):
             # back to the archive (with its invalidation bookkeeping) on a miss.
             select_cols = (
                 "id, text, context, event_date, occurred_start, occurred_end, "
-                "mentioned_at, fact_type, document_id, chunk_id, tags, source_memory_ids, "
+                "mentioned_at, fact_type, document_id, chunk_id, tags, metadata, source_memory_ids, "
                 "observation_scopes, edited_at"
             )
             row = await conn.fetchrow(
@@ -7604,6 +7638,7 @@ class MemoryEngine(MemoryEngineInterface):
                 "document_id": row["document_id"] if row["document_id"] else None,
                 "chunk_id": str(row["chunk_id"]) if row["chunk_id"] else None,
                 "tags": row["tags"] if row["tags"] else [],
+                "metadata": conn.parse_json(row["metadata"]) if row["metadata"] is not None else {},
                 "observation_scopes": row["observation_scopes"] if row["observation_scopes"] else None,
                 "state": unit_state,
                 "invalidation_reason": row["invalidation_reason"],
@@ -9754,13 +9789,15 @@ class MemoryEngine(MemoryEngineInterface):
         bank_id: str,
         *,
         request_context: "RequestContext",
+        force_refresh: bool = False,
     ) -> dict[str, Any]:
         """Get statistics about memory nodes and links for a bank.
 
-        Results are served from a short-TTL per-process cache so a polling
-        client cannot drive the link/unit aggregations multiple times per
-        second; concurrent misses on the same bank are coalesced onto a
-        single in-flight loader.
+        Results are served from a short-TTL cache (a shared table on PostgreSQL,
+        per-process on Oracle) so a polling client cannot drive the link/unit
+        aggregations multiple times per second. Pass ``force_refresh=True`` to
+        bypass the cached value and recompute (the fresh result also refreshes
+        the cache for subsequent callers).
         """
         await self._authenticate_tenant(request_context)
         if self._operation_validator:
@@ -9776,6 +9813,7 @@ class MemoryEngine(MemoryEngineInterface):
             schema,
             bank_id,
             lambda: self._compute_bank_stats(bank_id),
+            force_refresh=force_refresh,
         )
 
     async def _compute_bank_stats(self, bank_id: str) -> dict[str, Any]:

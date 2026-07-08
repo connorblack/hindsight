@@ -17,7 +17,6 @@ def setup_test_env():
     # Save original environment values
     env_vars_to_set = {
         "HINDSIGHT_API_SKIP_LLM_VERIFICATION": "true",
-        "HINDSIGHT_API_LAZY_RERANKER": "true",
         "HINDSIGHT_API_LLM_PROVIDER": "mock",
         "HINDSIGHT_API_LLM_MODEL": "default-model",
         "HINDSIGHT_API_RETAIN_LLM_PROVIDER": "mock",
@@ -76,7 +75,6 @@ class TestPerOperationLLMConfig:
 
         engine = MemoryEngine(
             skip_llm_verification=True,
-            lazy_reranker=True,
         )
 
         # Verify default config
@@ -105,7 +103,6 @@ class TestPerOperationLLMConfig:
 
         engine = MemoryEngine(
             skip_llm_verification=True,
-            lazy_reranker=True,
         )
 
         for cfg in (
@@ -165,7 +162,6 @@ class TestPerOperationLLMConfig:
             reflect_llm_provider="mock",
             reflect_llm_model="explicit-reflect",
             skip_llm_verification=True,
-            lazy_reranker=True,
         )
 
         assert engine._llm_config.model == "explicit-default"
@@ -188,7 +184,6 @@ class TestPerOperationLLMConfig:
 
             engine = MemoryEngine(
                 skip_llm_verification=True,
-                lazy_reranker=True,
             )
 
             # All should fall back to default
@@ -302,7 +297,6 @@ class TestRetainUsesRetainLLMConfig:
             reflect_llm_provider="mock",
             reflect_llm_model="reflect-specific-model",
             skip_llm_verification=True,
-            lazy_reranker=True,
         )
 
         # Verify the retain LLM config is set correctly
@@ -328,7 +322,6 @@ class TestReflectUsesReflectLLMConfig:
             reflect_llm_provider="mock",
             reflect_llm_model="reflect-specific-model",
             skip_llm_verification=True,
-            lazy_reranker=True,
         )
 
         # Verify the reflect LLM config is set correctly
@@ -354,7 +347,6 @@ class TestReflectUsesReflectLLMConfig:
             reflect_llm_provider="mock",
             reflect_llm_model="reflect-specific-model",
             skip_llm_verification=True,
-            lazy_reranker=True,
         )
 
         engine._authenticate_tenant = AsyncMock()  # type: ignore[method-assign]

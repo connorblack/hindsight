@@ -577,7 +577,6 @@ ENV_LLAMACPP_EXTRA_ARGS = "HINDSIGHT_API_LLAMACPP_EXTRA_ARGS"
 
 # Optimization flags
 ENV_SKIP_LLM_VERIFICATION = "HINDSIGHT_API_SKIP_LLM_VERIFICATION"
-ENV_LAZY_RERANKER = "HINDSIGHT_API_LAZY_RERANKER"
 
 # Database migrations
 ENV_RUN_MIGRATIONS_ON_STARTUP = "HINDSIGHT_API_RUN_MIGRATIONS_ON_STARTUP"
@@ -643,6 +642,7 @@ ENV_RECALL_BUDGET_MAX = "HINDSIGHT_API_RECALL_BUDGET_MAX"
 
 # Recall candidate gating (per-source cap + BM25 score floor)
 ENV_BM25_MIN_SCORE = "HINDSIGHT_API_BM25_MIN_SCORE"
+ENV_BM25_MAX_QUERY_TERMS = "HINDSIGHT_API_BM25_MAX_QUERY_TERMS"
 ENV_RECALL_MAX_CANDIDATES_PER_SOURCE = "HINDSIGHT_API_RECALL_MAX_CANDIDATES_PER_SOURCE"
 # Per-strategy recall boost. Prioritises specific retrieval arms (semantic,
 # bm25, graph, temporal) on recall via a human priority level — e.g.
@@ -794,6 +794,9 @@ DEFAULT_SEMANTIC_MIN_SIMILARITY = 0.3
 # zero-score (non-matching) rows on backends — notably VectorChord — whose
 # operator ranks every document rather than pre-filtering to term matches.
 DEFAULT_BM25_MIN_SCORE = 0.0
+# Native tsvector BM25 can optionally cap the OR tsquery built from normalized
+# query tokens. 0 preserves the historical uncapped behavior.
+DEFAULT_BM25_MAX_QUERY_TERMS = 0
 # Per-source candidate cap applied to each retrieval arm (semantic, BM25, graph,
 # temporal) before RRF, so a single over-expanding backend cannot fill the
 # reranker's global candidate budget on its own. 0 disables the cap.
@@ -1212,6 +1215,19 @@ def _parse_positive_int(name: str, raw: str | None, default: int) -> int:
         raise ValueError(f"{name} must be an integer, got {raw!r}") from e
     if parsed < 1:
         raise ValueError(f"{name} must be >= 1, got {parsed}")
+    return parsed
+
+
+def _parse_non_negative_int(name: str, raw: str | None, default: int) -> int:
+    """Parse an env var that must be an integer >= 0."""
+    if raw is None or raw == "":
+        return default
+    try:
+        parsed = int(raw)
+    except ValueError as e:
+        raise ValueError(f"{name} must be an integer, got {raw!r}") from e
+    if parsed < 0:
+        raise ValueError(f"{name} must be >= 0, got {parsed}")
     return parsed
 
 
@@ -1895,7 +1911,6 @@ class HindsightConfig:
 
     # Optimization flags
     skip_llm_verification: bool
-    lazy_reranker: bool
 
     # Database migrations
     run_migrations_on_startup: bool
@@ -1990,6 +2005,7 @@ class HindsightConfig:
     reflect_llm_strategy: LLMStrategyConfig | None = None
     consolidation_llm_members: list[LLMMemberConfig] = field(default_factory=list)
     consolidation_llm_strategy: LLMStrategyConfig | None = None
+    bm25_max_query_terms: int = DEFAULT_BM25_MAX_QUERY_TERMS
 
     # Class-level sets for configuration categorization
 
@@ -2189,6 +2205,9 @@ class HindsightConfig:
             raise ValueError(
                 f"Invalid semantic_min_similarity: {self.semantic_min_similarity}. Must be between 0.0 and 1.0"
             )
+
+        if self.bm25_max_query_terms < 0:
+            raise ValueError(f"Invalid bm25_max_query_terms: {self.bm25_max_query_terms}. Must be >= 0")
 
         # Validate bedrock_service_tier
         valid_bedrock_tiers = (None, "flex", "priority", "reserved")
@@ -2622,6 +2641,11 @@ class HindsightConfig:
             reranker_max_candidates=int(os.getenv(ENV_RERANKER_MAX_CANDIDATES, str(DEFAULT_RERANKER_MAX_CANDIDATES))),
             semantic_min_similarity=float(os.getenv(ENV_SEMANTIC_MIN_SIMILARITY, str(DEFAULT_SEMANTIC_MIN_SIMILARITY))),
             bm25_min_score=float(os.getenv(ENV_BM25_MIN_SCORE, str(DEFAULT_BM25_MIN_SCORE))),
+            bm25_max_query_terms=_parse_non_negative_int(
+                ENV_BM25_MAX_QUERY_TERMS,
+                os.getenv(ENV_BM25_MAX_QUERY_TERMS),
+                DEFAULT_BM25_MAX_QUERY_TERMS,
+            ),
             recall_max_candidates_per_source=int(
                 os.getenv(ENV_RECALL_MAX_CANDIDATES_PER_SOURCE, str(DEFAULT_RECALL_MAX_CANDIDATES_PER_SOURCE))
             ),
@@ -2742,7 +2766,6 @@ class HindsightConfig:
             ),
             # Optimization flags
             skip_llm_verification=os.getenv(ENV_SKIP_LLM_VERIFICATION, "false").lower() == "true",
-            lazy_reranker=os.getenv(ENV_LAZY_RERANKER, "false").lower() == "true",
             # Retain settings
             retain_max_completion_tokens=int(
                 os.getenv(ENV_RETAIN_MAX_COMPLETION_TOKENS, str(DEFAULT_RETAIN_MAX_COMPLETION_TOKENS))
