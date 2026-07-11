@@ -439,6 +439,7 @@ def _member_to_llm(member: "LLMMemberConfig", config: HindsightConfig, defaults:
         reasoning_effort=member.reasoning_effort or config.llm_reasoning_effort,
         extra_body=member.extra_body,
         default_headers=member.default_headers or config.llm_default_headers,
+        ollama_num_ctx=config.llm_ollama_num_ctx,
         bedrock_service_tier=member.bedrock_service_tier,
         gemini_service_tier=member.gemini_service_tier or config.llm_gemini_service_tier,
         gemini_safety_settings=_get_raw_config().llm_gemini_safety_settings,
@@ -1126,6 +1127,7 @@ class MemoryEngine(MemoryEngineInterface):
             reasoning_effort=config.llm_reasoning_effort,
             extra_body=config.llm_extra_body,
             default_headers=config.llm_default_headers,
+            ollama_num_ctx=config.llm_ollama_num_ctx,
             litellmrouter_config=config.llm_litellmrouter_config,
             bedrock_service_tier=config.llm_bedrock_service_tier,
             gemini_service_tier=config.llm_gemini_service_tier,
@@ -1172,6 +1174,7 @@ class MemoryEngine(MemoryEngineInterface):
             if config.retain_llm_extra_body is not None
             else config.llm_extra_body,
             default_headers=config.llm_default_headers,
+            ollama_num_ctx=config.llm_ollama_num_ctx,
             litellmrouter_config=config.retain_llm_litellmrouter_config or config.llm_litellmrouter_config,
             bedrock_service_tier=config.llm_bedrock_service_tier,
             gemini_service_tier=config.llm_gemini_service_tier,
@@ -1212,6 +1215,7 @@ class MemoryEngine(MemoryEngineInterface):
             if config.reflect_llm_extra_body is not None
             else config.llm_extra_body,
             default_headers=config.llm_default_headers,
+            ollama_num_ctx=config.llm_ollama_num_ctx,
             litellmrouter_config=config.reflect_llm_litellmrouter_config or config.llm_litellmrouter_config,
             bedrock_service_tier=config.llm_bedrock_service_tier,
             gemini_service_tier=config.llm_gemini_service_tier,
@@ -1254,6 +1258,7 @@ class MemoryEngine(MemoryEngineInterface):
                 else config.llm_extra_body
             ),
             default_headers=config.llm_default_headers,
+            ollama_num_ctx=config.llm_ollama_num_ctx,
             litellmrouter_config=config.consolidation_llm_litellmrouter_config or config.llm_litellmrouter_config,
             bedrock_service_tier=config.llm_bedrock_service_tier,
             gemini_service_tier=config.llm_gemini_service_tier,
