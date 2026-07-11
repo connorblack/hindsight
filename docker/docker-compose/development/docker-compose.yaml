@@ -1,0 +1,207 @@
+name: hindsight-hermes
+# Development flavor — deploys the fork's `development` branch (upstream main +
+# our commits) BUILT FROM SOURCE, against the existing hindsight-hermes data.
+#
+# Invariants (data preservation):
+#   * `name: hindsight-hermes` and the `postgres_data` volume key MUST NOT
+#     change — they bind this stack to the live volume
+#     `hindsight-hermes_postgres_data`. NEVER run `down -v`.
+#   * db / pgbouncer definitions mirror the previously-deployed stack exactly.
+#
+# Environment:
+#   * `.env` here is a symlink to the repo-root flat `.env` (single static,
+#     hand-maintained source of truth, mode 0600, gitignored). It feeds BOTH
+#     compose ${...} interpolation and the containers via env_file.
+#
+# Dreaming extension:
+#   * Bind-mounted from the hindsight-dreaming repo (symlinked at the repo
+#     root) so extension changes apply on container restart — no rebuild.
+#   * Activated via HINDSIGHT_API_HTTP_EXTENSION in .env.
+#
+# Deploy (from the repo root):
+#   docker compose -f docker/docker-compose/development/docker-compose.yaml up -d --build
+#
+# First deploy replaces the pinned 0.8.4 image with a dev-built one and runs
+# forward DB migrations on startup — take a pg snapshot first.
+
+services:
+  db:
+    image: ${POSTGRES_IMAGE:?set in repo-root .env}
+    restart: unless-stopped
+    shm_size: ${POSTGRES_SHM_SIZE:-8gb}
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-hindsight}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set in repo-root .env}
+      POSTGRES_DB: ${POSTGRES_DB:-hindsight}
+      PGDATA: /home/postgres/pgdata/data
+      TZ: ${TZ:-America/New_York}
+    volumes:
+      - postgres_data:/home/postgres/pgdata
+    ports:
+      - target: 5432
+        published: ${POSTGRES_HOST_PORT:-55432}
+        host_ip: 127.0.0.1
+        protocol: tcp
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -p 5432 -U ${POSTGRES_USER:-hindsight} -d ${POSTGRES_DB:-hindsight} || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+      start_period: 30s
+    stop_grace_period: 60s
+    networks:
+      - hindsight
+
+  pgbouncer:
+    image: ${PGBOUNCER_IMAGE:?set in repo-root .env}
+    restart: unless-stopped
+    environment:
+      DB_HOST: db
+      DB_PORT: "5432"
+      DB_USER: ${POSTGRES_USER:-hindsight}
+      DB_PASSWORD: ${POSTGRES_PASSWORD:?set in repo-root .env}
+      DB_NAME: ${POSTGRES_DB:-hindsight}
+      LISTEN_PORT: "6432"
+      POOL_MODE: transaction
+      MAX_CLIENT_CONN: "300"
+      DEFAULT_POOL_SIZE: "50"
+      MIN_POOL_SIZE: "2"
+      RESERVE_POOL_SIZE: "10"
+      RESERVE_POOL_TIMEOUT: "3"
+      QUERY_WAIT_TIMEOUT: "60"
+      SERVER_IDLE_TIMEOUT: "300"
+      CLIENT_LOGIN_TIMEOUT: "60"
+      AUTH_TYPE: scram-sha-256
+      IGNORE_STARTUP_PARAMETERS: extra_float_digits,options
+      TZ: ${TZ:-America/New_York}
+    ports:
+      - target: 6432
+        published: ${PGBOUNCER_HOST_PORT:-56432}
+        host_ip: 127.0.0.1
+        protocol: tcp
+    depends_on:
+      db:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -p 6432 -U ${POSTGRES_USER:-hindsight} -d ${POSTGRES_DB:-hindsight} || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 15
+      start_period: 30s
+    stop_grace_period: 30s
+    networks:
+      - hindsight
+
+  hindsight:
+    image: ${HINDSIGHT_IMAGE:-hindsight-hermes:development}
+    build:
+      context: ../../..
+      dockerfile: docker/standalone/Dockerfile
+      args:
+        INCLUDE_API: "true"
+        INCLUDE_CP: "true"
+        # External providers only (gx10 embed/rerank, cloud LLMs) — skip the
+        # local-ml torch stack and model preload for a slim, fast build.
+        INCLUDE_LOCAL_MODELS: "false"
+        PRELOAD_ML_MODELS: "false"
+    restart: unless-stopped
+    init: true
+    shm_size: 2gb
+    ulimits:
+      nofile:
+        soft: 1048576
+        hard: 1048576
+    env_file:
+      - path: .env
+        required: true
+    environment:
+      HINDSIGHT_ENABLE_API: "true"
+      HINDSIGHT_ENABLE_CP: "false"
+    extra_hosts:
+      - host.docker.internal:host-gateway
+    volumes:
+      # Dreaming extension source, mounted read-only from the hindsight-dreaming
+      # repo (via the gitignored repo-root symlink). Restart to apply changes.
+      - type: bind
+        source: ../../../hindsight-dreaming/deploy/orbstack/extensions/hindsight_api/extensions/builtin/dreaming
+        target: /app/api/hindsight_api/extensions/builtin/dreaming
+        read_only: true
+    ports:
+      - target: 8888
+        published: ${HINDSIGHT_API_HOST_PORT:-8888}
+        host_ip: 127.0.0.1
+        protocol: tcp
+    depends_on:
+      db:
+        condition: service_healthy
+      pgbouncer:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://127.0.0.1:8888/health || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+      start_period: 5m
+    stop_grace_period: 60s
+    networks:
+      - hindsight
+
+  control-plane:
+    image: ${HINDSIGHT_IMAGE:-hindsight-hermes:development}
+    restart: unless-stopped
+    env_file:
+      - path: .env
+        required: true
+    environment:
+      HINDSIGHT_ENABLE_API: "false"
+      HINDSIGHT_ENABLE_CP: "true"
+      HINDSIGHT_CP_HOSTNAME: 0.0.0.0
+      HINDSIGHT_CP_PORT: "9999"
+      HINDSIGHT_CP_DATAPLANE_API_URL: http://hindsight:8888
+    depends_on:
+      hindsight:
+        condition: service_healthy
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "node",
+          "-e",
+          "fetch('http://127.0.0.1:9999/api/health').then(async r=>{const j=await r.json();if(!r.ok||j.dataplane?.status!=='connected')process.exit(1)}).catch(()=>process.exit(1))",
+        ]
+      interval: 10s
+      timeout: 10s
+      retries: 20
+      start_period: 30s
+    stop_grace_period: 30s
+    networks:
+      - hindsight
+
+  admin:
+    image: ${HINDSIGHT_IMAGE:-hindsight-hermes:development}
+    profiles: ["tools"]
+    env_file:
+      - path: .env
+        required: true
+    environment:
+      # Admin/migration tasks talk to Postgres directly, not through PgBouncer.
+      HINDSIGHT_API_DATABASE_URL: postgresql://${POSTGRES_USER:-hindsight}:${POSTGRES_PASSWORD:?set in repo-root .env}@db:5432/${POSTGRES_DB:-hindsight}
+    extra_hosts:
+      - host.docker.internal:host-gateway
+    volumes:
+      - type: bind
+        source: ${HINDSIGHT_MIGRATION_DIR:?set in repo-root .env}
+        target: /migrations
+    entrypoint: ["hindsight-admin"]
+    depends_on:
+      db:
+        condition: service_healthy
+    networks:
+      - hindsight
+
+volumes:
+  postgres_data:
+
+networks:
+  hindsight:
+    driver: bridge
