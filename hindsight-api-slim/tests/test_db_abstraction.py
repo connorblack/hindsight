@@ -4,6 +4,7 @@ Unit tests that verify the abstraction interfaces work correctly
 without requiring a live database connection.
 """
 
+import asyncio
 from unittest.mock import AsyncMock, patch
 
 import pytest
@@ -174,9 +175,6 @@ class TestPostgreSQLDialect:
 
     def test_for_update_skip_locked(self, d):
         assert d.for_update_skip_locked() == "FOR UPDATE SKIP LOCKED"
-
-    def test_advisory_lock(self, d):
-        assert d.advisory_lock("$1") == "pg_try_advisory_lock($1)"
 
     def test_generate_uuid(self, d):
         assert d.generate_uuid() == "gen_random_uuid()"
@@ -569,6 +567,48 @@ class TestPostgreSQLBackendUnit:
         with pytest.raises(RuntimeError, match="not initialized"):
             backend.get_pool()
 
+    def test_is_ready_false_before_initialize(self):
+        assert PostgreSQLBackend().is_ready is False
+
+    @pytest.mark.asyncio
+    async def test_is_ready_false_for_whole_shutdown(self):
+        """is_ready must flip before the (awaited, non-instant) pool close, so
+        best-effort writers skip instead of racing a closing pool."""
+        backend = PostgreSQLBackend()
+        ready_during_close = None
+
+        class _SlowClosingPool:
+            async def close(self):
+                nonlocal ready_during_close
+                ready_during_close = backend.is_ready
+                await asyncio.sleep(0)
+
+        backend._pool = _SlowClosingPool()
+        assert backend.is_ready is True
+        await backend.shutdown()
+        assert ready_during_close is False
+        assert backend.is_ready is False
+
+    @pytest.mark.asyncio
+    async def test_init_callback_also_passed_as_setup(self):
+        # asyncpg runs RESET ALL when a connection is released back to the pool,
+        # which wipes the session GUCs the init callback SET. The same callback
+        # must also be wired as setup= so it re-applies on every acquire.
+        backend = PostgreSQLBackend()
+
+        async def cb(conn):
+            return None
+
+        with patch(
+            "hindsight_api.engine.db.postgresql.asyncpg.create_pool",
+            new=AsyncMock(return_value=object()),
+        ) as create_pool:
+            await backend.initialize("postgresql://localhost/test", init_callback=cb)
+
+        kwargs = create_pool.call_args.kwargs
+        assert kwargs["init"] is cb
+        assert kwargs["setup"] is cb
+
 
 # ---------------------------------------------------------------------------
 # Config integration test
@@ -589,6 +629,37 @@ class TestConfig:
         from hindsight_api.config import DEFAULT_DATABASE_BACKEND
 
         assert DEFAULT_DATABASE_BACKEND == "postgresql"
+
+
+# ---------------------------------------------------------------------------
+# Entity expansion CTE tests
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("ops_module", "ops_class", "limit_clause"),
+    [
+        ("hindsight_api.engine.db.ops_postgresql", "PostgreSQLOps", "LIMIT 7"),
+        ("hindsight_api.engine.db.ops_oracle", "OracleOps", "FETCH FIRST 7 ROWS ONLY"),
+    ],
+)
+def test_entity_expansion_filters_fact_type_before_per_entity_cap(
+    ops_module: str, ops_class: str, limit_clause: str
+) -> None:
+    """The cap is per entity *and target fact type*, preventing mixed types from
+    exhausting a target type's candidate budget before the outer query sees it.
+    """
+    from importlib import import_module
+
+    ops = getattr(import_module(ops_module), ops_class)()
+    cte = ops.build_entity_expansion_cte("memory_units", "unit_entities", 7)
+
+    lateral_start = cte.index("CROSS JOIN LATERAL")
+    lateral_end = cte.index(") t", lateral_start)
+    lateral_query = cte[lateral_start:lateral_end]
+
+    assert "mu_target.fact_type = $2" in lateral_query
+    assert lateral_query.index("mu_target.fact_type = $2") < lateral_query.index(limit_clause)
 
 
 # ---------------------------------------------------------------------------
@@ -879,6 +950,10 @@ class TestOracleSetSessionSchema:
             async def execute(self, sql: str) -> None:
                 executed.append(sql)
 
+            async def fetchone(self):
+                # SESSION_USER lookup used to cache the connection's default schema.
+                return ("APP_USER",)
+
             def close(self) -> None:  # synchronous, like oracledb.AsyncCursor.close
                 closed["count"] += 1
 
@@ -897,14 +972,34 @@ class TestOracleSetSessionSchema:
         assert any('ALTER SESSION SET CURRENT_SCHEMA = "TENANT_X"' in s for s in executed)
 
     @pytest.mark.asyncio
-    async def test_public_schema_is_a_noop(self):
-        """The default ``public`` schema does no session work on Oracle."""
+    async def test_public_schema_resets_to_default_schema(self):
+        """The default ``public`` schema resets a pooled Oracle session to its default.
+
+        Oracle pooled connections retain ``CURRENT_SCHEMA`` across checkouts, so a
+        connection previously used for a tenant schema would still point at that
+        tenant unless the ``public`` acquisition explicitly resets it (#2708). The
+        reset applies ``ALTER SESSION SET CURRENT_SCHEMA`` to the cached SESSION_USER,
+        and the synchronous ``cursor.close()`` is not awaited.
+        """
         from hindsight_api.engine import memory_engine
         from hindsight_api.engine.db.oracle import OracleBackend
 
+        executed: list[str] = []
+        closed = {"count": 0}
+
+        class _FakeAsyncCursor:
+            async def execute(self, sql: str) -> None:
+                executed.append(sql)
+
+            async def fetchone(self):
+                return ("APP_USER",)
+
+            def close(self) -> None:  # synchronous, like oracledb.AsyncCursor.close
+                closed["count"] += 1
+
         class _FakeConn:
-            def cursor(self):
-                raise AssertionError("cursor() must not be called for the public schema")
+            def cursor(self) -> "_FakeAsyncCursor":
+                return _FakeAsyncCursor()
 
         backend = OracleBackend()
         token = memory_engine._current_schema.set("public")
@@ -912,3 +1007,6 @@ class TestOracleSetSessionSchema:
             await backend._set_session_schema(_FakeConn())
         finally:
             memory_engine._current_schema.reset(token)
+
+        assert closed["count"] == 1
+        assert any('ALTER SESSION SET CURRENT_SCHEMA = "APP_USER"' in s for s in executed)

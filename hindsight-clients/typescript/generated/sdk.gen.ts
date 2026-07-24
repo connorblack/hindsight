@@ -53,6 +53,9 @@ import type {
   DeleteMentalModelData,
   DeleteMentalModelErrors,
   DeleteMentalModelResponses,
+  DeleteOperationData,
+  DeleteOperationErrors,
+  DeleteOperationResponses,
   DeleteWebhookData,
   DeleteWebhookErrors,
   DeleteWebhookResponses,
@@ -877,7 +880,7 @@ export const cancelOperation = <ThrowOnError extends boolean = false>(
 /**
  * Get operation status
  *
- * Get the status of a specific async operation. Returns 'pending', 'completed', or 'failed'. Completed operations are removed from storage, so 'completed' means the operation finished successfully.
+ * Get the status of a specific async operation. Returns 'pending', 'processing', 'completed', 'failed', or 'cancelled'. Completed operations remain queryable with their payload for the configured retention window and are pruned afterward.
  */
 export const getOperationStatus = <ThrowOnError extends boolean = false>(
   options: Options<GetOperationStatusData, ThrowOnError>
@@ -898,6 +901,19 @@ export const retryOperation = <ThrowOnError extends boolean = false>(
 ) =>
   (options.client ?? client).post<RetryOperationResponses, RetryOperationErrors, ThrowOnError>({
     url: "/v1/default/banks/{bank_id}/operations/{operation_id}/retry",
+    ...options,
+  });
+
+/**
+ * Delete a terminal async operation
+ *
+ * Permanently remove a failed, cancelled, or completed async operation record
+ */
+export const deleteOperation = <ThrowOnError extends boolean = false>(
+  options: Options<DeleteOperationData, ThrowOnError>
+) =>
+  (options.client ?? client).delete<DeleteOperationResponses, DeleteOperationErrors, ThrowOnError>({
+    url: "/v1/default/banks/{bank_id}/operations/{operation_id}/delete",
     ...options,
   });
 

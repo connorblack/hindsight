@@ -4,6 +4,8 @@ Uses unnest(), LATERAL, DISTINCT ON, and native array operations for
 efficient batch operations.
 """
 
+from datetime import datetime
+
 from .base import DatabaseConnection
 from .ops import DataAccessOps, TagListingParts
 from .result import ResultRow
@@ -275,7 +277,7 @@ class PostgreSQLOps(DataAccessOps):
     ) -> list[ResultRow]:
         return await conn.fetch(
             f"""
-            SELECT e.id, LOWER(e.canonical_name) AS name_lower, inputs.input_name
+            SELECT e.id, e.canonical_name, LOWER(e.canonical_name) AS name_lower, inputs.input_name
             FROM {table} e
             JOIN (
                 SELECT LOWER(n) AS input_name_lower, n AS input_name
@@ -285,6 +287,42 @@ class PostgreSQLOps(DataAccessOps):
             """,
             bank_id,
             missing_names,
+        )
+
+    async def bulk_reassert_entities(
+        self,
+        conn: DatabaseConnection,
+        table: str,
+        bank_id: str,
+        entity_ids: list[str],
+        canonical_names: list[str],
+    ) -> None:
+        # One statement, one round-trip (same shape as bulk_insert_links):
+        #   * the CTE takes FOR KEY SHARE on every parent that still exists,
+        #     held to COMMIT, so a concurrent prune_orphan_entities DELETE blocks
+        #     until the caller's unit_entities insert has committed;
+        #   * the INSERT re-creates only the parents that were already pruned
+        #     (NOT IN locked), carrying the canonical_name resolved in Phase 1.
+        # ON CONFLICT DO NOTHING (no target) keeps the rare case where another
+        # worker recreated the name under a new id from raising — that row stays
+        # absent and its unit link is the sole casualty, never the whole batch.
+        await conn.execute(
+            f"""
+            WITH locked AS (
+                SELECT id FROM {table}
+                WHERE id = ANY($2::uuid[])
+                ORDER BY id
+                FOR KEY SHARE
+            )
+            INSERT INTO {table} (id, bank_id, canonical_name)
+            SELECT t.entity_id, $1, t.canonical_name
+            FROM unnest($2::uuid[], $3::text[]) AS t(entity_id, canonical_name)
+            WHERE t.entity_id NOT IN (SELECT id FROM locked)
+            ON CONFLICT DO NOTHING
+            """,
+            bank_id,
+            entity_ids,
+            canonical_names,
         )
 
     async def bulk_insert_unit_entities(
@@ -391,30 +429,47 @@ class PostgreSQLOps(DataAccessOps):
         # has no bank_id column — entities don't span banks, so scoping via
         # entity_id_1 is sufficient).
         #
-        # The cooccurrence PK is canonical (entity_id_1 < entity_id_2). The previous form ran a
-        # *correlated* double self-join of unit_entities for EACH cooccurrence row — a Nested Loop
-        # Anti Join over the whole table — which on a large/over-stamped bank blew past
-        # statement_timeout and failed graph maintenance 100%. De-correlate it: materialize the
-        # bank's currently-valid canonical pairs ONCE (single merge-join self-join, ~seconds), then
-        # anti-join the cooccurrence table against that set. The `u1.entity_id < u2.entity_id` join
-        # predicate matches the stored canonical ordering (and halves the self-join).
+        # Ordered locking (deadlock avoidance, #2529): retain's concurrent
+        # cooccurrence upsert (entity_resolver._flush_pending) locks rows in
+        # sorted (entity_id_1, entity_id_2) order — sorted specifically to give
+        # every writer one consistent lock-acquisition order. A plain
+        # `DELETE ... USING` scans/locks in whatever order the join plan picks,
+        # so it could lock the same rows in the opposite order and cycle. We
+        # instead select the victims in that same sorted order `FOR UPDATE`
+        # first — the locking clause materialises the CTE and places LockRows
+        # above the Sort, so locks are acquired ascending, matching the upsert —
+        # then delete the already-locked rows. Same order on both sides ⇒ no
+        # cycle (the deadlock is prevented, not merely retried). The Pass 2/3
+        # retry wrap in run_graph_maintenance_job stays as a backstop for the
+        # residual paths (FK cascade from prune_orphan_entities, Oracle).
+        #
+        # The staleness predicate is an INTERSECT of the two entities' unit sets
+        # rather than the equivalent `unit_entities u1 JOIN u2 ON u1.unit_id =
+        # u2.unit_id` self-join (#2473): both INTERSECT branches resolve as Index
+        # Only Scans on idx_unit_entities_entity_unit (entity_id, unit_id), so the
+        # per-pair cost is bounded by the two entities' degrees. The self-join let
+        # the planner pick an anti-join that rescanned a high-degree hub entity's
+        # membership set for every pair — 28-30min on a bank with a ~100K-membership
+        # hub, even when zero rows were stale. Don't "simplify" it back.
         result = await conn.execute(
             f"""
-            WITH valid AS MATERIALIZED (
-                SELECT DISTINCT u1.entity_id AS e1, u2.entity_id AS e2
-                FROM {ue_table} u1
-                JOIN {ue_table} u2
-                  ON u1.unit_id = u2.unit_id AND u1.entity_id < u2.entity_id
-                JOIN {entities_table} e ON e.id = u1.entity_id AND e.bank_id = $1
+            WITH victims AS (
+                SELECT c.entity_id_1, c.entity_id_2
+                FROM {ec_table} c
+                JOIN {entities_table} e ON e.id = c.entity_id_1
+                WHERE e.bank_id = $1
+                  AND NOT EXISTS (
+                      SELECT unit_id FROM {ue_table} WHERE entity_id = c.entity_id_1
+                      INTERSECT
+                      SELECT unit_id FROM {ue_table} WHERE entity_id = c.entity_id_2
+                  )
+                ORDER BY c.entity_id_1, c.entity_id_2
+                FOR UPDATE OF c
             )
             DELETE FROM {ec_table} c
-            USING {entities_table} e
-            WHERE e.id = c.entity_id_1
-              AND e.bank_id = $1
-              AND NOT EXISTS (
-                  SELECT 1 FROM valid v
-                  WHERE v.e1 = c.entity_id_1 AND v.e2 = c.entity_id_2
-              )
+            USING victims v
+            WHERE c.entity_id_1 = v.entity_id_1
+              AND c.entity_id_2 = v.entity_id_2
             """,
             bank_id,
         )
@@ -518,11 +573,18 @@ class PostgreSQLOps(DataAccessOps):
                     FROM {ue_table} ue_target
                     WHERE ue_target.entity_id = se.entity_id
                       AND ue_target.unit_id != ALL($1::uuid[])
+                      -- Filter before applying the cap: candidates from other fact
+                      -- types must not consume this entity's bounded fan-out.
+                      AND EXISTS (
+                          SELECT 1
+                          FROM {mu_table} mu_target
+                          WHERE mu_target.id = ue_target.unit_id
+                            AND mu_target.fact_type = $2
+                      )
                     ORDER BY ue_target.unit_id DESC
                     LIMIT {per_entity_limit}
                 ) t
                 JOIN {mu_table} mu ON mu.id = t.unit_id
-                WHERE mu.fact_type = $2
                 GROUP BY mu.id
                 ORDER BY score DESC
                 LIMIT $3
@@ -870,6 +932,93 @@ class PostgreSQLOps(DataAccessOps):
         )
 
     # -- Task claiming operations ------------------------------------------
+
+    async def prune_terminal_operations(
+        self,
+        conn: DatabaseConnection,
+        table: str,
+        cutoff: datetime,
+        *,
+        batch_size: int,
+    ) -> int:
+        # Lock only the bounded candidate set. SKIP LOCKED lets multiple
+        # workers prune disjoint batches without waiting or double-deleting.
+        # Cancelled children cannot complete parent aggregation, so retain the
+        # parent guard only for completed/failed children. Before removing a
+        # cancelled child, preserve its signal by cancelling a pending parent
+        # in this transaction and refreshing the parent's retention window.
+        candidates = await conn.fetch(
+            f"""
+            SELECT candidate_operation.operation_id
+            FROM {table} candidate_operation
+            WHERE candidate_operation.status IN ('completed', 'failed', 'cancelled')
+              AND candidate_operation.updated_at < $1
+              AND (
+                  candidate_operation.status = 'cancelled'
+                  OR NOT EXISTS (
+                      SELECT 1
+                      FROM {table} parent
+                      WHERE parent.operation_id = CASE
+                          WHEN candidate_operation.result_metadata->>'parent_operation_id'
+                              ~* '^[0-9a-f]{{8}}-[0-9a-f]{{4}}-[0-9a-f]{{4}}-[0-9a-f]{{4}}-[0-9a-f]{{12}}$'
+                          THEN (candidate_operation.result_metadata->>'parent_operation_id')::uuid
+                          ELSE NULL
+                      END
+                        AND parent.bank_id = candidate_operation.bank_id
+                  )
+              )
+            ORDER BY candidate_operation.updated_at, candidate_operation.operation_id
+            LIMIT $2
+            FOR UPDATE OF candidate_operation SKIP LOCKED
+            """,
+            cutoff,
+            batch_size,
+        )
+        if not candidates:
+            return 0
+
+        candidate_ids = [row["operation_id"] for row in candidates]
+        await conn.execute(
+            f"""
+            UPDATE {table} parent
+            SET status = 'cancelled',
+                updated_at = now(),
+                completed_at = COALESCE(parent.completed_at, now()),
+                error_message = COALESCE(
+                    parent.error_message,
+                    'Cancelled because a child operation was cancelled'
+                )
+            WHERE parent.status = 'pending'
+              AND EXISTS (
+                  SELECT 1
+                  FROM {table} candidate_operation
+                  WHERE candidate_operation.operation_id = ANY($1)
+                    AND candidate_operation.status = 'cancelled'
+                    AND candidate_operation.updated_at < $2
+                    AND candidate_operation.bank_id = parent.bank_id
+                    AND parent.operation_id = CASE
+                        WHEN candidate_operation.result_metadata->>'parent_operation_id'
+                            ~* '^[0-9a-f]{{8}}-[0-9a-f]{{4}}-[0-9a-f]{{4}}-[0-9a-f]{{4}}-[0-9a-f]{{12}}$'
+                        THEN (candidate_operation.result_metadata->>'parent_operation_id')::uuid
+                        ELSE NULL
+                    END
+              )
+            """,
+            candidate_ids,
+            cutoff,
+        )
+        rows = await conn.fetch(
+            f"""
+            DELETE FROM {table}
+            WHERE operation_id = ANY($1)
+              AND status IN ('completed', 'failed', 'cancelled')
+              AND updated_at < $2
+            RETURNING operation_id
+            """,
+            candidate_ids,
+            cutoff,
+        )
+        return len(rows)
 
     async def _claim_consolidation_tasks(
         self,
