@@ -139,6 +139,20 @@ def _extract_non_chinese_period(query: str, reference_date: datetime) -> DateRan
             start = datetime(year, month_num, 1)
             return _constraint(start, _month_end(year, month_num))
 
+    # Bare year with no month context (e.g. "2025", "articles ... reporter 2025")
+    # -> the whole year. "<Month> <year>" is handled above; exact dates
+    # ("March 7, 2025", "13 July 2026") carry a month name and fall through to
+    # dateparser for day precision. Without this rule a lone 4-digit year reaches
+    # dateparser, which fills the missing month/day from the reference date and
+    # collapses to a spurious 24h window (the bug this fixes).
+    if not any(
+        re.search(rf"\b({pattern})\b", query, re.IGNORECASE) for pattern in month_patterns
+    ):
+        bare_year = re.search(r"\b(19|20)\d{2}\b", query)
+        if bare_year:
+            year = int(bare_year.group(0))
+            return _constraint(datetime(year, 1, 1), datetime(year, 12, 31))
+
     return None
 
 
