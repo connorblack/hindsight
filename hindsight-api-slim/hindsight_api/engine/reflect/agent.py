@@ -16,6 +16,14 @@ from typing import TYPE_CHECKING, Any, Awaitable, Callable
 
 from ...config import get_config
 from ..llm_interface import LLM_TOOL_CHOICE_AUTO, LLMToolChoice
+from ..streaming import (
+    ProgressEmitter,
+    ProgressPhase,
+    ProgressStatus,
+    ReflectIterationData,
+    ReflectResponseData,
+    ReflectToolData,
+)
 from .models import DirectiveInfo, LLMCall, ReflectAgentResult, StructuredOutputResult, TokenUsageSummary, ToolCall
 from .prompts import (
     _extract_directive_rules,
@@ -544,6 +552,7 @@ async def _run_reflect_agent_inner(
     max_context_tokens: int = 100_000,
     llm_output_language: str | None = None,
     cancel_check: Callable[[], None] | None = None,
+    progress: ProgressEmitter | None = None,
     *,
     reflect_id: str,
     provider_impl: Any,
@@ -755,6 +764,15 @@ async def _run_reflect_agent_inner(
         # (issue #2122). Raises OperationCancelledError when fired.
         if cancel_check is not None:
             cancel_check()
+
+        # Announce the start of this agentic-loop iteration to streaming consumers.
+        if progress is not None:
+            await progress.send(
+                phase=ProgressPhase.ITERATION,
+                status=ProgressStatus.STARTED,
+                message=f"Iteration {iteration + 1} of {max_iterations}",
+                data=ReflectIterationData(iteration=iteration + 1, max_iterations=max_iterations),
+            )
 
         is_last = iteration == max_iterations - 1
 
@@ -1215,6 +1233,16 @@ async def _run_reflect_agent_inner(
         # Execute other tools in parallel (exclude done tool in all its format variants)
         other_tools = [tc for tc in result.tool_calls if not _is_done_tool(tc.name)]
         if other_tools:
+            # Surface the model's reasoning for this iteration before running its
+            # tools, so streaming consumers see the "thought" that led to the calls.
+            if progress is not None and result.content:
+                await progress.send(
+                    phase=ProgressPhase.RESPONSE,
+                    status=ProgressStatus.COMPLETED,
+                    message="Model reasoning",
+                    data=ReflectResponseData(iteration=iteration + 1, text=result.content),
+                )
+
             # Partition into enabled vs hallucinated (not in enabled_tools set)
             allowed_tools = []
             hallucinated_tools = []
@@ -1251,6 +1279,21 @@ async def _run_reflect_agent_inner(
                 )
 
             other_tools = allowed_tools
+
+            # Announce each tool invocation before running it (streaming tool-use):
+            # the client sees "calling recall(...)" live rather than only the result.
+            if progress is not None:
+                for tc in other_tools:
+                    await progress.send(
+                        phase=ProgressPhase.TOOL_CALL,
+                        status=ProgressStatus.STARTED,
+                        message=f"{_normalize_tool_name(tc.name)}: {_summarize_input(tc.name, tc.arguments)}",
+                        data=ReflectToolData(
+                            iteration=iteration + 1,
+                            tool=_normalize_tool_name(tc.name),
+                            input_summary=_summarize_input(tc.name, tc.arguments),
+                        ),
+                    )
 
             # Kick off the next-turn cache (covering THIS call's input) so it
             # builds concurrently with the tool execution below — hiding the
@@ -1379,6 +1422,21 @@ async def _run_reflect_agent_inner(
                         "output_chars": output_chars,
                     }
                 )
+
+                # Emit tool completion (with timing + result size) to streaming consumers.
+                if progress is not None:
+                    await progress.send(
+                        phase=ProgressPhase.TOOL_CALL,
+                        status=ProgressStatus.COMPLETED,
+                        message=f"{normalized_tool_name}: {output_chars} chars in {duration_ms}ms",
+                        data=ReflectToolData(
+                            iteration=iteration + 1,
+                            tool=normalized_tool_name,
+                            input_summary=input_summary,
+                            output_chars=output_chars,
+                            duration_ms=duration_ms,
+                        ),
+                    )
 
                 # Keep context history for fallback final prompt
                 context_history.append({"tool": tc.name, "input": input_dict, "output": output})

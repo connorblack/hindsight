@@ -374,6 +374,13 @@ from .retain.types import RetainContentDict
 from .search.reranking import CrossEncoderReranker, apply_combined_scoring
 from .search.tags import TagGroup, TagsMatch, build_tag_groups_where_clause, build_tags_where_clause
 from .search.types import ScoredResult
+from .streaming import (
+    ProgressEmitter,
+    ProgressPhase,
+    ProgressStatus,
+    RecallStageData,
+    RetrievalMethodStat,
+)
 from .task_backend import TaskBackend
 
 # Recall ranking strategy: how the per-arm (semantic/bm25/graph/temporal) results are
@@ -860,11 +867,7 @@ def _resolve_refresh_tag_filtering(
 
         months = _rolling_month_tags(int(rolling_months))
         adapter = TypeAdapter(TagGroup)
-        parsed = [
-            adapter.validate_python(
-                {"or": [{"tags": [tag], "match": "any_strict"} for tag in months]}
-            )
-        ]
+        parsed = [adapter.validate_python({"or": [{"tags": [tag], "match": "any_strict"} for tag in months]})]
         logger.info(
             "[MENTAL_MODEL_REFRESH] rolling_months=%s resolved to window %s..%s",
             rolling_months,
@@ -4294,6 +4297,7 @@ class MemoryEngine(MemoryEngineInterface):
         created_after: datetime | None = None,
         created_before: datetime | None = None,
         min_scores: MinScores | None = None,
+        progress: ProgressEmitter | None = None,
         _connection_budget: int | None = None,
         _quiet: bool = False,
         reranking: RecallReranking = "cross_encoder",
@@ -4465,6 +4469,7 @@ class MemoryEngine(MemoryEngineInterface):
                             include_source_facts=include_source_facts,
                             max_source_facts_tokens=max_source_facts_tokens,
                             max_source_facts_tokens_per_observation=max_source_facts_tokens_per_observation,
+                            progress=progress,
                             reranking=reranking,
                         )
                         break  # Success - exit retry loop
@@ -4603,6 +4608,7 @@ class MemoryEngine(MemoryEngineInterface):
         include_source_facts: bool = False,
         max_source_facts_tokens: int = 4096,
         max_source_facts_tokens_per_observation: int = -1,
+        progress: ProgressEmitter | None = None,
         reranking: RecallReranking = "cross_encoder",
     ) -> RecallResultModel:
         """
@@ -4816,6 +4822,51 @@ class MemoryEngine(MemoryEngineInterface):
                     )
 
             step_duration = time.time() - step_start
+
+            # Emit the completed parallel-retrieval stage as step progress. Retrieval is
+            # batched (semantic+bm25 share one SQL; graph runs per-fact-type), so the
+            # per-method durations are the aggregated wall-clock, not independent timers.
+            if progress is not None:
+                retrieval_total = (
+                    len(semantic_results) + len(bm25_results) + len(graph_results) + len(temporal_results or [])
+                )
+                await progress.send(
+                    phase=ProgressPhase.RETRIEVAL,
+                    status=ProgressStatus.COMPLETED,
+                    message=f"Parallel retrieval: {retrieval_total} candidates in {parallel_duration:.2f}s",
+                    data=RecallStageData(
+                        stage="retrieval",
+                        count=retrieval_total,
+                        duration_s=parallel_duration,
+                        methods=[
+                            RetrievalMethodStat(
+                                fact_type="*",
+                                method="semantic",
+                                count=len(semantic_results),
+                                duration_s=aggregated_timings["semantic"],
+                            ),
+                            RetrievalMethodStat(
+                                fact_type="*",
+                                method="bm25",
+                                count=len(bm25_results),
+                                duration_s=aggregated_timings["bm25"],
+                            ),
+                            RetrievalMethodStat(
+                                fact_type="*",
+                                method="graph",
+                                count=len(graph_results),
+                                duration_s=aggregated_timings["graph"],
+                            ),
+                            RetrievalMethodStat(
+                                fact_type="*",
+                                method="temporal",
+                                count=len(temporal_results or []),
+                                duration_s=aggregated_timings["temporal_extraction"],
+                            ),
+                        ],
+                    ),
+                )
+
             # Format per-method timings
             timing_parts = [
                 f"semantic={len(semantic_results)}({aggregated_timings['semantic']:.3f}s)",
@@ -4979,6 +5030,15 @@ class MemoryEngine(MemoryEngineInterface):
             finally:
                 fusion_span.set_attribute("hindsight.merged_count", len(merged_candidates))
                 fusion_span.end()
+
+            # Emit the completed fusion stage as step progress.
+            if progress is not None:
+                await progress.send(
+                    phase=ProgressPhase.FUSION,
+                    status=ProgressStatus.COMPLETED,
+                    message=f"Fusion: {len(merged_candidates)} unique candidates in {step_duration:.2f}s",
+                    data=RecallStageData(stage="fusion", count=len(merged_candidates), duration_s=step_duration),
+                )
 
             if tracer:
                 # Convert MergedCandidate to old tuple format for tracer
@@ -5145,6 +5205,16 @@ class MemoryEngine(MemoryEngineInterface):
                     "combined_scoring",
                     time.time() - scoring_start,
                     {"candidates_scored": len(scored_results)},
+                )
+
+            # Emit the completed rerank + combined-scoring stage as step progress.
+            if progress is not None:
+                rerank_elapsed = time.time() - scoring_start
+                await progress.send(
+                    phase=ProgressPhase.RERANK,
+                    status=ProgressStatus.COMPLETED,
+                    message=f"Reranked + scored: {len(scored_results)} results in {rerank_elapsed:.2f}s",
+                    data=RecallStageData(stage="rerank", count=len(scored_results), duration_s=rerank_elapsed),
                 )
 
             # Cancellation checkpoint: reranking is done; skip the remaining
@@ -9230,6 +9300,7 @@ class MemoryEngine(MemoryEngineInterface):
         recall_chunks_max_tokens_override: int | None = None,
         created_after: datetime | None = None,
         created_before: datetime | None = None,
+        progress: ProgressEmitter | None = None,
         _skip_span: bool = False,
         _operation_label: str = "reflect",
     ) -> ReflectResult:
@@ -9507,6 +9578,7 @@ class MemoryEngine(MemoryEngineInterface):
                         max_context_tokens=max_context_tokens,
                         llm_output_language=getattr(resolved_reflect_config, "llm_output_language", None),
                         cancel_check=request_context.raise_if_cancelled,
+                        progress=progress,
                     ),
                     timeout=wall_timeout,
                 )

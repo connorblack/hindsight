@@ -24,7 +24,9 @@ from hindsight_api.engine.audit import AuditEntry, AuditLogger
 from hindsight_api.engine.memory_engine import Budget
 from hindsight_api.engine.response_models import VALID_RECALL_FACT_TYPES, MinScores
 from hindsight_api.engine.search.tags import TagGroup, TagsMatch
+from hindsight_api.engine.streaming import ProgressOperation
 from hindsight_api.extensions import OperationValidationError
+from hindsight_api.mcp_progress import mcp_progress_emitter
 from hindsight_api.models import RequestContext
 
 _TAG_GROUP_LIST_ADAPTER = TypeAdapter(list[TagGroup])
@@ -909,6 +911,10 @@ def _register_recall(mcp: FastMCP, memory: MemoryEngine, config: MCPToolsConfig)
                 if min_scores is not None:
                     recall_kwargs["min_scores"] = MinScores.model_validate(min_scores)
 
+                # Stream recall DAG stage progress to the MCP client (no-op outside an MCP request).
+                emitter = mcp_progress_emitter(ProgressOperation.RECALL)
+                if emitter is not None:
+                    recall_kwargs["progress"] = emitter
                 recall_result = await memory.recall_async(**recall_kwargs)
 
                 return recall_result.model_dump_json(indent=2)
@@ -993,6 +999,10 @@ def _register_recall(mcp: FastMCP, memory: MemoryEngine, config: MCPToolsConfig)
                 if min_scores is not None:
                     recall_kwargs["min_scores"] = MinScores.model_validate(min_scores)
 
+                # Stream recall DAG stage progress to the MCP client (no-op outside an MCP request).
+                emitter = mcp_progress_emitter(ProgressOperation.RECALL)
+                if emitter is not None:
+                    recall_kwargs["progress"] = emitter
                 recall_result = await memory.recall_async(**recall_kwargs)
 
                 return recall_result.model_dump()
@@ -1077,6 +1087,11 @@ def _register_reflect(mcp: FastMCP, memory: MemoryEngine, config: MCPToolsConfig
                     reflect_kwargs["tags"] = tags
                     reflect_kwargs["tags_match"] = tags_match
 
+                # Stream reflect loop tool-use + per-iteration responses to the MCP
+                # client (no-op outside an MCP request).
+                emitter = mcp_progress_emitter(ProgressOperation.REFLECT)
+                if emitter is not None:
+                    reflect_kwargs["progress"] = emitter
                 reflect_result = await memory.reflect_async(**reflect_kwargs)
 
                 result_data = json.loads(reflect_result.model_dump_json(indent=2))
@@ -1167,6 +1182,11 @@ def _register_reflect(mcp: FastMCP, memory: MemoryEngine, config: MCPToolsConfig
                     reflect_kwargs["tags"] = tags
                     reflect_kwargs["tags_match"] = tags_match
 
+                # Stream reflect loop tool-use + per-iteration responses to the MCP
+                # client (no-op outside an MCP request).
+                emitter = mcp_progress_emitter(ProgressOperation.REFLECT)
+                if emitter is not None:
+                    reflect_kwargs["progress"] = emitter
                 reflect_result = await memory.reflect_async(**reflect_kwargs)
 
                 result_data = reflect_result.model_dump()
