@@ -3256,8 +3256,8 @@ def _build_recall_response(core_result: RecallResultModel) -> "RecallResponse":
 
 async def _sse_operation_stream(
     operation: ProgressOperation,
-    run: Callable[[QueueProgressEmitter], Awaitable[Any]],
-    build_response: Callable[[Any], Any],
+    run: Callable[[QueueProgressEmitter], Awaitable[_T]],
+    build_response: Callable[[_T], BaseModel],
 ) -> AsyncIterator[str]:
     """Run a reflect/recall operation and yield its progress as an SSE event stream.
 
@@ -3270,7 +3270,7 @@ async def _sse_operation_stream(
     op_id = uuid.uuid4().hex
     emitter = QueueProgressEmitter(operation, op_id)
 
-    async def _runner() -> Any:
+    async def _runner() -> _T:
         try:
             return await run(emitter)
         finally:
