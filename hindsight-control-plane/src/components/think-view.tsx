@@ -3,6 +3,7 @@
 import { useState } from "react";
 import { useTranslations } from "next-intl";
 import { client } from "@/lib/api";
+import { streamOperation, type ProgressEvent as StreamEvent } from "@/lib/streaming";
 import { useBank } from "@/lib/bank-context";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -51,6 +52,7 @@ export function ThinkView() {
   const [includeToolCalls, setIncludeToolCalls] = useState(true);
   const [viewMode, setViewMode] = useState<ViewMode>("answer");
   const [result, setResult] = useState<any>(null);
+  const [progressEvents, setProgressEvents] = useState<StreamEvent[]>([]);
   const [loading, setLoading] = useState(false);
   const [tags, setTags] = useState("");
   const [tagsMatch, setTagsMatch] = useState<TagsMatch>("any");
@@ -162,7 +164,9 @@ export function ThinkView() {
         .map((s) => s.trim())
         .filter((s) => s.length > 0);
 
-      const data: any = await client.reflect({
+      setResult(null);
+      setProgressEvents([]);
+      const body = {
         bank_id: currentBank,
         query,
         budget,
@@ -173,8 +177,14 @@ export function ThinkView() {
         ...(factTypes.length > 0 && { fact_types: factTypes }),
         ...(excludeMentalModels && { exclude_mental_models: true }),
         ...(excludeIds.length > 0 && { exclude_mental_model_ids: excludeIds }),
+      };
+      // Stream the reflect: the agentic loop's tool-use + per-iteration responses render
+      // live, then the final answer arrives in the result frame.
+      await streamOperation<any>("/api/reflect/stream", body, {
+        onProgress: (event) => setProgressEvents((prev) => [...prev, event]),
+        onResult: (data) => setResult(data),
+        onError: (message) => console.error("Reflect stream error:", message),
       });
-      setResult(data);
     } catch (error) {
       // Error toast is shown automatically by the API client interceptor
     } finally {
@@ -316,12 +326,52 @@ export function ThinkView() {
         </CardContent>
       </Card>
 
-      {/* Loading State */}
+      {/* Loading State — live reflect activity feed (iterations, tool-use, responses) */}
       {loading && (
         <Card>
-          <CardContent className="flex flex-col items-center justify-center py-16">
-            <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-primary mb-4" />
-            <p className="text-muted-foreground">{t("reflectingOnMemories")}</p>
+          <CardContent className="py-8">
+            <div className="flex items-center gap-3 mb-4">
+              <div className="animate-spin rounded-full h-5 w-5 border-b-2 border-primary" />
+              <p className="text-muted-foreground">{t("reflectingOnMemories")}</p>
+            </div>
+            {progressEvents.length > 0 && (
+              <div className="space-y-1 font-mono text-xs max-h-72 overflow-y-auto rounded-md border bg-muted/30 p-3">
+                {progressEvents.map((event, i) => {
+                  const data = (event.data ?? {}) as Record<string, any>;
+                  switch (data.kind) {
+                    case "reflect_iteration":
+                      return (
+                        <div key={i} className="text-primary font-semibold pt-1">
+                          ▸ Iteration {data.iteration}/{data.max_iterations}
+                        </div>
+                      );
+                    case "reflect_response":
+                      return (
+                        <div key={i} className="text-muted-foreground italic pl-3">
+                          💭 {data.text}
+                        </div>
+                      );
+                    case "reflect_tool":
+                      return (
+                        <div key={i} className="pl-3">
+                          {event.status === "completed" ? "✓ " : "→ "}
+                          <span className="font-semibold">{data.tool}</span>
+                          {data.input_summary ? `(${data.input_summary})` : ""}
+                          {event.status === "completed"
+                            ? ` — ${data.output_chars} chars, ${data.duration_ms}ms`
+                            : " …"}
+                        </div>
+                      );
+                    default:
+                      return (
+                        <div key={i} className="text-muted-foreground pl-3">
+                          {event.message}
+                        </div>
+                      );
+                  }
+                })}
+              </div>
+            )}
           </CardContent>
         </Card>
       )}

@@ -3,7 +3,7 @@
 import { useState } from "react";
 import { formatUTCDate } from "@/lib/relative-time";
 import { useTranslations } from "next-intl";
-import { client } from "@/lib/api";
+import { streamOperation, type ProgressEvent as StreamEvent } from "@/lib/streaming";
 import { useBank } from "@/lib/bank-context";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -68,6 +68,7 @@ export function SearchDebugView() {
   const [observations, setObservations] = useState<any[] | null>(null);
   const [trace, setTrace] = useState<any | null>(null);
   const [loading, setLoading] = useState(false);
+  const [progressEvents, setProgressEvents] = useState<StreamEvent[]>([]);
   const [viewMode, setViewMode] = useState<ViewMode>("results");
   const [selectedMemory, setSelectedMemory] = useState<any | null>(null);
   const [expandedSteps, setExpandedSteps] = useState<Set<string>>(new Set());
@@ -147,13 +148,25 @@ export function SearchDebugView() {
         ...(parsedTags.length > 0 && { tags: parsedTags, tags_match: tagsMatch }),
       };
 
-      const data: any = await client.recall(requestBody);
-
-      setResults(data.results || []);
-      setEntities(data.entities || null);
-      setChunks(data.chunks || null);
-      setObservations(data.observations || null);
-      setTrace(data.trace || null);
+      setResults(null);
+      setEntities(null);
+      setChunks(null);
+      setObservations(null);
+      setTrace(null);
+      setProgressEvents([]);
+      // Stream the recall DAG: retrieval -> fusion -> rerank stages render live, then the
+      // full result + trace arrive in the result frame.
+      await streamOperation<any>("/api/recall/stream", requestBody, {
+        onProgress: (event) => setProgressEvents((prev) => [...prev, event]),
+        onResult: (data) => {
+          setResults(data.results || []);
+          setEntities(data.entities || null);
+          setChunks(data.chunks || null);
+          setObservations(data.observations || null);
+          setTrace(data.trace || null);
+        },
+        onError: (message) => toast.error(message),
+      });
       setViewMode("results");
     } catch (error) {
       // Error toast is shown automatically by the API client interceptor
@@ -291,12 +304,34 @@ export function SearchDebugView() {
         </CardContent>
       </Card>
 
-      {/* Results */}
+      {/* Loading State — live recall DAG stage progress (retrieval → fusion → rerank) */}
       {loading && (
         <Card>
-          <CardContent className="flex flex-col items-center justify-center py-16">
-            <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-primary mb-4" />
-            <p className="text-muted-foreground">{t("searchingMemories")}</p>
+          <CardContent className="py-8">
+            <div className="flex items-center gap-3 mb-4">
+              <div className="animate-spin rounded-full h-5 w-5 border-b-2 border-primary" />
+              <p className="text-muted-foreground">{t("searchingMemories")}</p>
+            </div>
+            {progressEvents.length > 0 && (
+              <div className="space-y-1 font-mono text-xs rounded-md border bg-muted/30 p-3">
+                {progressEvents
+                  .filter(
+                    (event) => (event.data as Record<string, any> | null)?.kind === "recall_stage"
+                  )
+                  .map((event, i) => {
+                    const data = event.data as Record<string, any>;
+                    return (
+                      <div key={i} className="flex items-center gap-2">
+                        <span className="text-primary">✓</span>
+                        <span className="font-semibold capitalize">{data.stage}</span>
+                        <span className="text-muted-foreground">
+                          {data.count} in {Number(data.duration_s).toFixed(2)}s
+                        </span>
+                      </div>
+                    );
+                  })}
+              </div>
+            )}
           </CardContent>
         </Card>
       )}
@@ -414,9 +449,7 @@ export function SearchDebugView() {
                                   <span className="truncate max-w-xs">{result.context}</span>
                                 )}
                                 {result.occurred_start && (
-                                  <span>
-                                    {formatUTCDate(result.occurred_start)}
-                                  </span>
+                                  <span>{formatUTCDate(result.occurred_start)}</span>
                                 )}
                               </div>
                               {result.scores && (
@@ -615,11 +648,15 @@ export function SearchDebugView() {
                                                       <span className="flex items-center gap-1 text-[10px] text-muted-foreground">
                                                         <Calendar className="h-3 w-3" />
                                                         {method.metadata.constraint.start
-                                                          ? formatUTCDate(method.metadata.constraint.start)
+                                                          ? formatUTCDate(
+                                                              method.metadata.constraint.start
+                                                            )
                                                           : "any"}
                                                         {" → "}
                                                         {method.metadata.constraint.end
-                                                          ? formatUTCDate(method.metadata.constraint.end)
+                                                          ? formatUTCDate(
+                                                              method.metadata.constraint.end
+                                                            )
                                                           : "any"}
                                                       </span>
                                                     )}
