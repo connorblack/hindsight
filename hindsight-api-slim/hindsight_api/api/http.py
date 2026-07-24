@@ -10,9 +10,10 @@ import json
 import logging
 import re
 import uuid
-from collections.abc import Awaitable
+from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
-from datetime import datetime
+from dataclasses import dataclass
+from datetime import datetime, timezone
 from typing import Any, Literal, TypeVar
 
 from fastapi import Depends, FastAPI, File, Form, Header, HTTPException, Query, Request, UploadFile
@@ -27,6 +28,15 @@ from hindsight_api.engine.audit import (
     AuditLogStatsResponse,
 )
 from hindsight_api.engine.llm_trace import LLMRequestListResponse, LLMRequestStatsResponse
+from hindsight_api.engine.streaming import (
+    ProgressErrorData,
+    ProgressEvent,
+    ProgressOperation,
+    ProgressPhase,
+    ProgressStatus,
+    QueueProgressEmitter,
+    format_sse,
+)
 from hindsight_api.extensions import AuthenticationError, PrecheckOperation
 
 
@@ -157,8 +167,10 @@ from hindsight_api.engine.response_models import (
     MemoryFact,
     MinScores,
     RecallScores,
+    ReflectResult,
     TokenUsage,
 )
+from hindsight_api.engine.response_models import RecallResult as RecallResultModel
 from hindsight_api.engine.search.tags import TagGroup, TagsMatch
 from hindsight_api.extensions import HttpExtension, OperationValidationError, load_extension
 from hindsight_api.metrics import (
@@ -3076,6 +3088,221 @@ def _make_audited_http(audit_logger_getter: Callable[[], AuditLogger | None]):
     return audited
 
 
+@dataclass
+class _RecallEngineArgs:
+    """Recall engine arguments derived from a RecallRequest (shared by JSON + SSE handlers)."""
+
+    fact_types: list[str]
+    question_date: datetime | None
+    include_entities: bool
+    max_entity_tokens: int
+    include_chunks: bool
+    max_chunk_tokens: int
+    include_source_facts: bool
+    max_source_facts_tokens: int
+    max_source_facts_tokens_per_observation: int
+
+
+def _parse_recall_request(request: "RecallRequest") -> _RecallEngineArgs:
+    """Derive recall engine args from the request. Raises HTTP 400 on a bad timestamp."""
+    fact_types = request.types if request.types else list(VALID_RECALL_FACT_TYPES)
+
+    question_date = None
+    if request.query_timestamp:
+        try:
+            question_date = datetime.fromisoformat(request.query_timestamp.replace("Z", "+00:00"))
+        except ValueError as e:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Invalid query_timestamp format. Expected ISO format (e.g., '2023-05-30T23:40:00'): {str(e)}",
+            )
+
+    include_entities = request.include.entities is not None
+    include_chunks = request.include.chunks is not None
+    include_source_facts = request.include.source_facts is not None
+    return _RecallEngineArgs(
+        fact_types=fact_types,
+        question_date=question_date,
+        include_entities=include_entities,
+        max_entity_tokens=request.include.entities.max_tokens if include_entities else 500,
+        include_chunks=include_chunks,
+        max_chunk_tokens=request.include.chunks.max_tokens if include_chunks else 8192,
+        include_source_facts=include_source_facts,
+        max_source_facts_tokens=request.include.source_facts.max_tokens if include_source_facts else 4096,
+        max_source_facts_tokens_per_observation=(
+            request.include.source_facts.max_tokens_per_observation if include_source_facts else -1
+        ),
+    )
+
+
+def _build_reflect_response(core_result: ReflectResult, include: "ReflectIncludeOptions") -> "ReflectResponse":
+    """Shape a core ReflectResult into the HTTP ReflectResponse.
+
+    Shared by the JSON and SSE reflect handlers so the streaming terminal frame carries
+    exactly the same object the non-streaming endpoint returns.
+    """
+    based_on_result: ReflectBasedOn | None = None
+    if include.facts is not None:
+        memories = []
+        mental_models = []
+        directives = []
+        for fact_type, facts in core_result.based_on.items():
+            if fact_type == "directives":
+                # Directives are dicts with id, name, content (not MemoryFact objects)
+                for directive in facts:
+                    directives.append(
+                        ReflectDirective(id=directive["id"], name=directive["name"], content=directive["content"])
+                    )
+            elif fact_type == "mental-models":
+                # Mental models are MemoryFact with type "mental-models" (hyphen, not underscore)
+                for fact in facts:
+                    mental_models.append(ReflectMentalModel(id=fact.id, text=fact.text, context=fact.context))
+            else:
+                for fact in facts:
+                    memories.append(
+                        ReflectFact(
+                            id=fact.id,
+                            text=fact.text,
+                            type=fact.fact_type,
+                            context=fact.context,
+                            occurred_start=fact.occurred_start,
+                            occurred_end=fact.occurred_end,
+                        )
+                    )
+        based_on_result = ReflectBasedOn(memories=memories, mental_models=mental_models, directives=directives)
+
+    trace_result: ReflectTrace | None = None
+    if include.tool_calls is not None:
+        include_output = include.tool_calls.output
+        tool_calls = [
+            ReflectToolCall(
+                tool=tc.tool,
+                input=tc.input,
+                output=tc.output if include_output else None,
+                duration_ms=tc.duration_ms,
+                iteration=tc.iteration,
+            )
+            for tc in core_result.tool_trace
+        ]
+        llm_calls = [ReflectLLMCall(scope=lc.scope, duration_ms=lc.duration_ms) for lc in core_result.llm_trace]
+        trace_result = ReflectTrace(tool_calls=tool_calls, llm_calls=llm_calls)
+
+    return ReflectResponse(
+        text=core_result.text,
+        based_on=based_on_result,
+        structured_output=core_result.structured_output,
+        usage=core_result.usage,
+        trace=trace_result,
+    )
+
+
+def _build_recall_response(core_result: RecallResultModel) -> "RecallResponse":
+    """Shape a core RecallResult into the HTTP RecallResponse (shared by JSON + SSE)."""
+
+    def _fact_to_result(fact: MemoryFact) -> "RecallResult":
+        return RecallResult(
+            id=fact.id,
+            text=fact.text,
+            type=fact.fact_type,
+            entities=fact.entities,
+            context=fact.context,
+            occurred_start=fact.occurred_start,
+            occurred_end=fact.occurred_end,
+            mentioned_at=fact.mentioned_at,
+            document_id=fact.document_id,
+            metadata=fact.metadata,
+            chunk_id=fact.chunk_id,
+            tags=fact.tags,
+            source_fact_ids=fact.source_fact_ids,
+            scores=fact.scores,
+        )
+
+    chunks_response = None
+    if core_result.chunks:
+        chunks_response = {}
+        for chunk_id, chunk_info in core_result.chunks.items():
+            chunks_response[chunk_id] = ChunkData(
+                id=chunk_id,
+                text=chunk_info.chunk_text,
+                chunk_index=chunk_info.chunk_index,
+                truncated=chunk_info.truncated,
+            )
+
+    entities_response = None
+    if core_result.entities:
+        entities_response = {}
+        for name, state in core_result.entities.items():
+            entities_response[name] = EntityStateResponse(
+                entity_id=state.entity_id,
+                canonical_name=state.canonical_name,
+                observations=[
+                    EntityObservationResponse(text=obs.text, mentioned_at=obs.mentioned_at)
+                    for obs in state.observations
+                ],
+            )
+
+    source_facts_response = None
+    if core_result.source_facts:
+        source_facts_response = {fact_id: _fact_to_result(fact) for fact_id, fact in core_result.source_facts.items()}
+
+    return RecallResponse(
+        results=[_fact_to_result(fact) for fact in core_result.results],
+        trace=core_result.trace,
+        entities=entities_response,
+        chunks=chunks_response,
+        source_facts=source_facts_response,
+    )
+
+
+async def _sse_operation_stream(
+    operation: ProgressOperation,
+    run: Callable[[QueueProgressEmitter], Awaitable[Any]],
+    build_response: Callable[[Any], Any],
+) -> AsyncIterator[str]:
+    """Run a reflect/recall operation and yield its progress as an SSE event stream.
+
+    Emits a ``progress`` frame per ProgressEvent as it happens, then a terminal
+    ``result`` frame carrying the fully-shaped response (identical to the JSON endpoint),
+    then ``done``. On failure an ``error`` frame is emitted instead. The engine runs in a
+    task so the emitter queue can be drained concurrently; the task is cancelled if the
+    client disconnects (Starlette closes the generator).
+    """
+    op_id = uuid.uuid4().hex
+    emitter = QueueProgressEmitter(operation, op_id)
+
+    async def _runner() -> Any:
+        try:
+            return await run(emitter)
+        finally:
+            # Unblock the drain loop below once the engine finishes (success or error).
+            await emitter.aclose()
+
+    task = asyncio.create_task(_runner())
+    try:
+        async for event in emitter.events():
+            yield format_sse("progress", event)
+        core_result = await task  # re-raises any engine error now that the queue is drained
+        yield format_sse("result", build_response(core_result))
+        yield "event: done\ndata: {}\n\n"
+    except Exception as e:
+        error_event = ProgressEvent(
+            operation=operation,
+            operation_id=op_id,
+            seq=0,
+            phase=ProgressPhase.ERROR,
+            status=ProgressStatus.ERROR,
+            ts=datetime.now(timezone.utc),
+            message=str(e),
+            data=ProgressErrorData(detail=str(e)),
+        )
+        yield format_sse("error", error_event)
+    finally:
+        # A client disconnect closes the generator (GeneratorExit) — never let the engine
+        # task outlive the request.
+        if not task.done():
+            task.cancel()
+
+
 def create_app(
     memory: MemoryEngine,
     initialize_memory: bool = True,
@@ -3913,34 +4140,7 @@ def _register_routes(app: FastAPI):
             )
 
         try:
-            # Default to world and experience if not specified (exclude observation)
-            fact_types = request.types if request.types else list(VALID_RECALL_FACT_TYPES)
-
-            # Parse query_timestamp if provided
-            question_date = None
-            if request.query_timestamp:
-                try:
-                    question_date = datetime.fromisoformat(request.query_timestamp.replace("Z", "+00:00"))
-                except ValueError as e:
-                    raise HTTPException(
-                        status_code=400,
-                        detail=f"Invalid query_timestamp format. Expected ISO format (e.g., '2023-05-30T23:40:00'): {str(e)}",
-                    )
-
-            # Determine entity inclusion settings
-            include_entities = request.include.entities is not None
-            max_entity_tokens = request.include.entities.max_tokens if include_entities else 500
-
-            # Determine chunk inclusion settings
-            include_chunks = request.include.chunks is not None
-            max_chunk_tokens = request.include.chunks.max_tokens if include_chunks else 8192
-
-            # Determine source facts inclusion settings
-            include_source_facts = request.include.source_facts is not None
-            max_source_facts_tokens = request.include.source_facts.max_tokens if include_source_facts else 4096
-            max_source_facts_tokens_per_observation = (
-                request.include.source_facts.max_tokens_per_observation if include_source_facts else -1
-            )
+            args = _parse_recall_request(request)
 
             pre_recall = time.time() - handler_start
             # Run recall with tracing (record metrics)
@@ -3960,16 +4160,16 @@ def _register_routes(app: FastAPI):
                         budget=request.budget,
                         max_tokens=request.max_tokens,
                         enable_trace=request.trace,
-                        fact_type=fact_types,
+                        fact_type=args.fact_types,
                         prefer_observations=request.prefer_observations,
-                        question_date=question_date,
-                        include_entities=include_entities,
-                        max_entity_tokens=max_entity_tokens,
-                        include_chunks=include_chunks,
-                        max_chunk_tokens=max_chunk_tokens,
-                        include_source_facts=include_source_facts,
-                        max_source_facts_tokens=max_source_facts_tokens,
-                        max_source_facts_tokens_per_observation=max_source_facts_tokens_per_observation,
+                        question_date=args.question_date,
+                        include_entities=args.include_entities,
+                        max_entity_tokens=args.max_entity_tokens,
+                        include_chunks=args.include_chunks,
+                        max_chunk_tokens=args.max_chunk_tokens,
+                        include_source_facts=args.include_source_facts,
+                        max_source_facts_tokens=args.max_source_facts_tokens,
+                        max_source_facts_tokens_per_observation=args.max_source_facts_tokens_per_observation,
                         request_context=request_context,
                         tags=request.tags,
                         tags_match=request.tags_match,
@@ -3980,67 +4180,7 @@ def _register_routes(app: FastAPI):
                     bank_id=bank_id,
                 )
 
-            # Convert core MemoryFact objects to API RecallResult objects (excluding internal metrics)
-            def _fact_to_result(fact: "MemoryFact") -> RecallResult:
-                return RecallResult(
-                    id=fact.id,
-                    text=fact.text,
-                    type=fact.fact_type,
-                    entities=fact.entities,
-                    context=fact.context,
-                    occurred_start=fact.occurred_start,
-                    occurred_end=fact.occurred_end,
-                    mentioned_at=fact.mentioned_at,
-                    document_id=fact.document_id,
-                    metadata=fact.metadata,
-                    chunk_id=fact.chunk_id,
-                    tags=fact.tags,
-                    source_fact_ids=fact.source_fact_ids,
-                    scores=fact.scores,
-                )
-
-            recall_results = [_fact_to_result(fact) for fact in core_result.results]
-
-            # Convert chunks from engine to HTTP API format
-            chunks_response = None
-            if core_result.chunks:
-                chunks_response = {}
-                for chunk_id, chunk_info in core_result.chunks.items():
-                    chunks_response[chunk_id] = ChunkData(
-                        id=chunk_id,
-                        text=chunk_info.chunk_text,
-                        chunk_index=chunk_info.chunk_index,
-                        truncated=chunk_info.truncated,
-                    )
-
-            # Convert core EntityState objects to API EntityStateResponse objects
-            entities_response = None
-            if core_result.entities:
-                entities_response = {}
-                for name, state in core_result.entities.items():
-                    entities_response[name] = EntityStateResponse(
-                        entity_id=state.entity_id,
-                        canonical_name=state.canonical_name,
-                        observations=[
-                            EntityObservationResponse(text=obs.text, mentioned_at=obs.mentioned_at)
-                            for obs in state.observations
-                        ],
-                    )
-
-            # Convert source facts dict to API format
-            source_facts_response = None
-            if core_result.source_facts:
-                source_facts_response = {
-                    fact_id: _fact_to_result(fact) for fact_id, fact in core_result.source_facts.items()
-                }
-
-            response = RecallResponse(
-                results=recall_results,
-                trace=core_result.trace,
-                entities=entities_response,
-                chunks=chunks_response,
-                source_facts=source_facts_response,
-            )
+            response = _build_recall_response(core_result)
 
             handler_duration = time.time() - handler_start
             recall_duration = time.time() - recall_start
@@ -4049,7 +4189,7 @@ def _register_routes(app: FastAPI):
                 logging.info(
                     f"[RECALL HTTP] bank={bank_id} handler_total={handler_duration:.3f}s "
                     f"pre={pre_recall:.3f}s recall={recall_duration:.3f}s post={post_recall:.3f}s "
-                    f"results={len(recall_results)} entities={len(entities_response) if entities_response else 0}"
+                    f"results={len(response.results)} entities={len(response.entities) if response.entities else 0}"
                 )
 
             return response
@@ -4136,74 +4276,7 @@ def _register_routes(app: FastAPI):
                     bank_id=bank_id,
                 )
 
-            # Build based_on (memories + mental_models + directives) if facts are requested
-            based_on_result: ReflectBasedOn | None = None
-            if request.include.facts is not None:
-                memories = []
-                mental_models = []
-                directives = []
-                for fact_type, facts in core_result.based_on.items():
-                    if fact_type == "directives":
-                        # Directives are dicts with id, name, content (not MemoryFact objects)
-                        for directive in facts:
-                            directives.append(
-                                ReflectDirective(
-                                    id=directive["id"],
-                                    name=directive["name"],
-                                    content=directive["content"],
-                                )
-                            )
-                    elif fact_type == "mental-models":
-                        # Mental models are MemoryFact with type "mental-models" (note: hyphen, not underscore)
-                        for fact in facts:
-                            mental_models.append(
-                                ReflectMentalModel(
-                                    id=fact.id,
-                                    text=fact.text,
-                                    context=fact.context,
-                                )
-                            )
-                    else:
-                        for fact in facts:
-                            memories.append(
-                                ReflectFact(
-                                    id=fact.id,
-                                    text=fact.text,
-                                    type=fact.fact_type,
-                                    context=fact.context,
-                                    occurred_start=fact.occurred_start,
-                                    occurred_end=fact.occurred_end,
-                                )
-                            )
-                based_on_result = ReflectBasedOn(memories=memories, mental_models=mental_models, directives=directives)
-
-            # Build trace (tool_calls + llm_calls + observations) if tool_calls is requested
-            trace_result: ReflectTrace | None = None
-            if request.include.tool_calls is not None:
-                include_output = request.include.tool_calls.output
-                tool_calls = [
-                    ReflectToolCall(
-                        tool=tc.tool,
-                        input=tc.input,
-                        output=tc.output if include_output else None,
-                        duration_ms=tc.duration_ms,
-                        iteration=tc.iteration,
-                    )
-                    for tc in core_result.tool_trace
-                ]
-                llm_calls = [ReflectLLMCall(scope=lc.scope, duration_ms=lc.duration_ms) for lc in core_result.llm_trace]
-                trace_result = ReflectTrace(
-                    tool_calls=tool_calls,
-                    llm_calls=llm_calls,
-                )
-
-            return ReflectResponse(
-                text=core_result.text,
-                based_on=based_on_result,
-                structured_output=core_result.structured_output,
-                usage=core_result.usage,
-                trace=trace_result,
-            )
+            return _build_reflect_response(core_result, request.include)
 
         except OperationValidationError as e:
             raise HTTPException(status_code=e.status_code, detail=e.reason)
@@ -4223,6 +4296,112 @@ def _register_routes(app: FastAPI):
             error_detail = f"{str(e)}\n\nTraceback:\n{traceback.format_exc()}"
             logger.error(f"Error in /v1/default/banks/{bank_id}/reflect: {error_detail}")
             raise HTTPException(status_code=500, detail=str(e))
+
+    @app.post(
+        "/v1/default/banks/{bank_id}/reflect/stream",
+        operation_id="reflect_stream",
+        # SSE (text/event-stream) is not modeled in the typed OpenAPI schema; the
+        # control-plane consumes it directly. Frames are defined in _sse_operation_stream.
+        include_in_schema=False,
+    )
+    async def api_reflect_stream(
+        bank_id: str,
+        request: ReflectRequest,
+        http_request: Request,
+        request_context: RequestContext = Depends(get_request_context),
+        _precheck: None = Depends(precheck_for(PrecheckOperation.REFLECT)),
+    ):
+        from fastapi.responses import StreamingResponse
+
+        # Cancel the engine if the client disconnects: hand the scope's cancellation token
+        # to the engine (checked at iteration/stage boundaries), mirroring the non-streaming
+        # handler's run_cancellable_on_disconnect (issue #2122).
+        token = get_scope_cancellation_token(http_request.scope)
+        if token is not None:
+            request_context.cancellation = token
+
+        query = request.query
+        if request.context:
+            query = f"{request.query}\n\nAdditional context: {request.context}"
+
+        async def _run(emitter: QueueProgressEmitter) -> ReflectResult:
+            return await app.state.memory.reflect_async(
+                bank_id=bank_id,
+                query=query,
+                budget=request.budget,
+                context=None,
+                max_tokens=request.max_tokens,
+                response_schema=request.response_schema,
+                request_context=request_context,
+                tags=request.tags,
+                tags_match=request.tags_match,
+                tag_groups=request.tag_groups,
+                fact_types=request.fact_types,
+                exclude_mental_models=request.exclude_mental_models,
+                exclude_mental_model_ids=request.exclude_mental_model_ids,
+                progress=emitter,
+            )
+
+        return StreamingResponse(
+            _sse_operation_stream(
+                ProgressOperation.REFLECT,
+                _run,
+                lambda core_result: _build_reflect_response(core_result, request.include),
+            ),
+            media_type="text/event-stream",
+            headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+        )
+
+    @app.post(
+        "/v1/default/banks/{bank_id}/memories/recall/stream",
+        operation_id="recall_stream",
+        include_in_schema=False,
+    )
+    async def api_recall_stream(
+        bank_id: str,
+        request: RecallRequest,
+        http_request: Request,
+        request_context: RequestContext = Depends(get_request_context),
+        _precheck: None = Depends(precheck_for(PrecheckOperation.RECALL)),
+    ):
+        from fastapi.responses import StreamingResponse
+
+        token = get_scope_cancellation_token(http_request.scope)
+        if token is not None:
+            request_context.cancellation = token
+
+        parsed = _parse_recall_request(request)
+
+        async def _run(emitter: QueueProgressEmitter) -> RecallResultModel:
+            return await app.state.memory.recall_async(
+                bank_id=bank_id,
+                query=request.query,
+                budget=request.budget,
+                max_tokens=request.max_tokens,
+                enable_trace=request.trace,
+                fact_type=parsed.fact_types,
+                prefer_observations=request.prefer_observations,
+                question_date=parsed.question_date,
+                include_entities=parsed.include_entities,
+                max_entity_tokens=parsed.max_entity_tokens,
+                include_chunks=parsed.include_chunks,
+                max_chunk_tokens=parsed.max_chunk_tokens,
+                include_source_facts=parsed.include_source_facts,
+                max_source_facts_tokens=parsed.max_source_facts_tokens,
+                max_source_facts_tokens_per_observation=parsed.max_source_facts_tokens_per_observation,
+                request_context=request_context,
+                tags=request.tags,
+                tags_match=request.tags_match,
+                tag_groups=request.tag_groups,
+                min_scores=request.min_scores,
+                progress=emitter,
+            )
+
+        return StreamingResponse(
+            _sse_operation_stream(ProgressOperation.RECALL, _run, _build_recall_response),
+            media_type="text/event-stream",
+            headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+        )
 
     @app.get(
         "/v1/default/banks",
