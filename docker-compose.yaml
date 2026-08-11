@@ -35,6 +35,9 @@ services:
         condition: service_healthy
     extra_hosts:
       - "host.docker.internal:host-gateway"
+    networks:
+      - default
+      - coolify
     expose:
       - "8888"
       - "9999"
@@ -162,3 +165,7 @@ services:
       start_period: 5m
 volumes:
   postgres_data:
+
+networks:
+  coolify:
+    external: true
