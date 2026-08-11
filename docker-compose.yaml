@@ -160,21 +160,5 @@ services:
       timeout: 60s
       retries: 30
       start_period: 5m
-    labels:
-      - traefik.enable=true
-      - traefik.http.middlewares.hindsight-gzip.compress=true
-      - traefik.http.routers.hindsight-api.entryPoints=http
-      - 'traefik.http.routers.hindsight-api.rule=Host(`hindsight.dev.sellie.ai`) && (PathPrefix(`/v1`) || Path(`/health`) || PathPrefix(`/health/`) || Path(`/version`))'
-      - traefik.http.routers.hindsight-api.priority=100
-      - traefik.http.routers.hindsight-api.middlewares=hindsight-gzip
-      - traefik.http.routers.hindsight-api.service=hindsight-api
-      - traefik.http.services.hindsight-api.loadbalancer.server.port=8888
-      - traefik.http.routers.hindsight-cp.entryPoints=http
-      - 'traefik.http.routers.hindsight-cp.rule=Host(`hindsight.dev.sellie.ai`) && PathPrefix(`/`)'
-      - traefik.http.routers.hindsight-cp.priority=10
-      - traefik.http.routers.hindsight-cp.middlewares=hindsight-gzip
-      - traefik.http.routers.hindsight-cp.service=hindsight-cp
-      - traefik.http.services.hindsight-cp.loadbalancer.server.port=9999
-
 volumes:
   postgres_data:
