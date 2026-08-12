@@ -187,6 +187,10 @@ services:
       start_period: 5m
 volumes:
   postgres_data:
+    # Adopt the existing migrated volume. Changing this name would start
+    # Hindsight against an empty database; never remove it with `down -v`.
+    name: hindsight-hermes_postgres_data
+    external: true
 
 networks:
   coolify:
