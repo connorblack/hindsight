@@ -21,23 +21,13 @@ services:
       start_period: 30s
 
   hindsight:
-    build:
-      context: .
-      dockerfile: docker/standalone/Dockerfile
-      args:
-        INCLUDE_API: "true"
-        INCLUDE_CP: "true"
-        INCLUDE_LOCAL_MODELS: "true"
-        PRELOAD_ML_MODELS: "true"
+    image: ghcr.io/vectorize-io/hindsight@sha256:a0e937366261b8a8f20ebcaf13758c689c381dcbbf01684e4375c2787c8c666d
     restart: unless-stopped
     depends_on:
       db:
         condition: service_healthy
     extra_hosts:
       - "host.docker.internal:host-gateway"
-    networks:
-      - default
-      - coolify
     expose:
       - "8888"
       - "9999"
@@ -190,8 +180,4 @@ volumes:
     # Adopt the existing migrated volume. Changing this name would start
     # Hindsight against an empty database; never remove it with `down -v`.
     name: hindsight-hermes_postgres_data
-    external: true
-
-networks:
-  coolify:
     external: true
